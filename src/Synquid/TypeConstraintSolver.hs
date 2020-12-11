@@ -86,7 +86,10 @@ data TypingState = TypingState {
   _hornClauses :: [(Formula, Id)],              -- ^ Horn clauses generated from subtyping constraints
   _consistencyChecks :: [Formula],              -- ^ Formulas generated from type consistency constraints
   _errorContext :: (SourcePos, Doc)             -- ^ Information to be added to all type errors
-}
+} deriving Show
+
+instance Pretty TypingState where
+  pretty = text . show
 
 makeLenses ''TypingState
 

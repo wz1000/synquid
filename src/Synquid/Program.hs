@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, DeriveFunctor #-}
+{-# LANGUAGE TemplateHaskell, DeriveFunctor, PatternSynonyms #-}
 
 -- | Executable programs
 module Synquid.Program where
@@ -29,9 +29,12 @@ data Case t = Case {
   expr :: Program t       -- ^ Result of the match in this case
 } deriving (Show, Eq, Ord, Functor)
 
+pattern PSymbol id <- PSymbol' _ id where
+  PSymbol id = PSymbol' Nothing id
+
 -- | Program skeletons parametrized by information stored symbols, conditionals, and by node types
 data BareProgram t =
-  PSymbol Id |                                -- ^ Symbol (variable or constant)
+  PSymbol' (Maybe Int) Id |                                -- ^ Symbol (variable or constant)
   PApp (Program t) (Program t) |              -- ^ Function application
   PFun Id (Program t) |                       -- ^ Lambda abstraction
   PIf (Program t) (Program t) (Program t) |   -- ^ Conditional

@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, Rank2Types #-}
+{-# LANGUAGE TemplateHaskell, TypeApplications, TypeOperators, Rank2Types, DataKinds, TypeSynonymInstances, FlexibleInstances, NoStarIsType, NamedFieldPuns, DeriveGeneric, DeriveAnyClass, MultiParamTypeClasses, ScopedTypeVariables, PatternSynonyms #-}
 
 -- | Formulas of the refinement logic
 module Synquid.Logic where
@@ -11,15 +11,421 @@ import qualified Data.Set as Set
 import Data.Set (Set)
 import qualified Data.Map as Map
 import Data.Map (Map)
+import Data.Maybe (fromJust)
 
 import Control.Lens hiding (both)
 import Control.Monad
 
+import qualified Torch.Typed as T
+import Torch.Typed hiding (length, replicate)
+import GHC.TypeLits
+import Data.Hashable
+import qualified Torch.Tensor as U
+import qualified Torch.NN as U
+import qualified Torch.Autograd as U
+import Data.Int
+import GHC.Generics
+import GHC.Exts
+import Control.Monad.State.Strict
+import Data.Functor.Identity
+import Data.Proxy
+import Data.Kind
+import System.Directory
+import GHC.Stack (HasCallStack)
+
+type Env = ()
+type Size = 10
+type Dev = '(CPU,0)
+type DT = 'Float
+type Encoding = Tensor Dev DT '[Size]
+
+getParams :: String -> IO BaseWeights
+getParams file = do
+  m <- sampleBaseWeights
+  exists <- doesFileExist file
+  if exists
+  then do
+    let x = hmap' ToDependent . flattenParameters $ m
+    ts1 <- load file `asTypeOf` (pure x)
+    ts <- hmapM' MakeIndependent ts1
+    pure $ replaceParameters m ts
+  else pure m
+
+saveParams :: String -> BaseWeights -> IO ()
+saveParams file model = do
+  save (hmap' ToDependent . flattenParameters $ model) file
+
+sampleBaseWeights :: IO BaseWeights
+sampleBaseWeights = sample ()
+
 {- Sorts -}
+class Encode a where
+  encode :: Env -> BaseWeights -> a -> Encoding
+
+instance Encode r => Encode [r] where
+  encode env bw xs = foldr (encodeLCons bw . encode env bw) (encodeNil bw) xs
+
+instance Encode () where
+  encode _ bw _ = encodeUnit bw
+
+instance (Encode a, Encode b) => Encode (a,b) where
+  encode env bw (a,b) = encodePair bw (encode env bw a) (encode env bw b)
+
+instance Encode Encoding where
+  encode _ _ = id
+
+-- Takes n inputs to 1 output (each of size Size)
+
+type Layer inp out = Linear inp out DT Dev
+
+type Production n = Layer (n*Size) Size
+type Terminal = Production 1
+
+runModel :: forall batch. BaseWeights -> Tensor Dev DT '[batch,2*Size] -> Tensor Dev DT '[batch,2]
+runModel BaseWeights{layer2,layer1,layer0}
+  = softmax @1
+  . forward layer2
+  . relu
+  . forward layer1
+  . relu
+  . forward layer0
+
+data BaseWeights = BaseWeights
+  { layer2 :: Layer 16 2
+  , layer1 :: Layer 64 16
+  , layer0 :: Layer (2*Size) 64
+
+-- Primitives
+  , w_Unit :: Terminal
+  , w_lcons :: Production 2
+  , w_Nil :: Terminal
+  , w_pair :: Production 2
+
+-- SchemaSkeleton
+  , w_monotype :: Production 1
+  , w_forallt :: Production 2
+  , w_forallp :: Production 2
+-- TypeSkeleton
+  , w_scalart :: Production 2
+  , w_functiont :: Production 3
+  , w_lett :: Production 3
+  , w_AnyT :: Terminal
+
+-- BaseType
+  , w_tyvart :: Production 1
+  , w_dttype :: Production 3
+  , w_IntT :: Terminal
+  , w_BoolT :: Terminal
+
+-- PredSig
+  , w_predsig :: Production 3
+
+-- Sorts
+  , w_vars :: Production 1
+  , w_IntS :: Terminal
+  , w_BoolS :: Terminal
+  , w_datas :: Production 2
+  , w_sets :: Production 1
+  , w_AnyS :: Terminal
+
+-- Formula
+  , w_all :: Production 2
+  , w_cons :: Production 3
+  , w_pred :: Production 3
+  , w_ite :: Production 3
+  , w_bin :: Production 3
+  , w_unary :: Production 2
+  , w_unknown :: Production 2
+  , w_var :: Production 2
+  , w_setl :: Production 2
+  , w_intl :: Production 1
+  , w_booll :: Production 1
+
+-- Unary
+  , w_Neg :: Terminal
+  , w_Not :: Terminal
+
+-- Binary
+  , w_Times :: Terminal
+  , w_Plus :: Terminal
+  , w_Minus :: Terminal
+  , w_Eq :: Terminal
+  , w_Neq :: Terminal
+  , w_Lt :: Terminal
+  , w_Le :: Terminal
+  , w_Gt :: Terminal
+  , w_Ge :: Terminal
+  , w_And :: Terminal
+  , w_Or :: Terminal
+  , w_Implies :: Terminal
+  , w_Iff :: Terminal
+  , w_Union :: Terminal
+  , w_Intersect :: Terminal
+  , w_Diff :: Terminal
+  , w_Member :: Terminal
+  , w_Subset :: Terminal
+  } deriving (Show, Generic, Parameterized)
+
+embedHelper :: Terminal -> Encoding
+embedHelper t = forward t (ones :: Encoding)
+
+encodeUnit :: BaseWeights -> Encoding
+encodeUnit = embedHelper . w_Unit
+
+encodeNil :: BaseWeights -> Encoding
+encodeNil = embedHelper . w_Nil
+
+encodeAnyT :: BaseWeights -> Encoding
+encodeAnyT = embedHelper . w_AnyT
+
+encodeIntT :: BaseWeights -> Encoding
+encodeIntT = embedHelper . w_IntT
+
+encodeBoolT :: BaseWeights -> Encoding
+encodeBoolT = embedHelper . w_BoolT
+
+encodeIntS :: BaseWeights -> Encoding
+encodeIntS = embedHelper . w_IntS
+
+encodeBoolS :: BaseWeights -> Encoding
+encodeBoolS = embedHelper . w_BoolS
+
+encodeAnyS :: BaseWeights -> Encoding
+encodeAnyS = embedHelper . w_AnyS
+
+encodeNeg :: BaseWeights -> Encoding
+encodeNeg = embedHelper . w_Neg
+
+encodeNot :: BaseWeights -> Encoding
+encodeNot = embedHelper . w_Not
+
+encodeTimes :: BaseWeights -> Encoding
+encodeTimes = embedHelper . w_Times
+
+encodePlus :: BaseWeights -> Encoding
+encodePlus = embedHelper . w_Plus
+
+encodeMinus :: BaseWeights -> Encoding
+encodeMinus = embedHelper . w_Minus
+
+encodeEq :: BaseWeights -> Encoding
+encodeEq = embedHelper . w_Eq
+
+encodeNeq :: BaseWeights -> Encoding
+encodeNeq = embedHelper . w_Neq
+
+encodeLt :: BaseWeights -> Encoding
+encodeLt = embedHelper . w_Lt
+
+encodeLe :: BaseWeights -> Encoding
+encodeLe = embedHelper . w_Le
+
+encodeGt :: BaseWeights -> Encoding
+encodeGt = embedHelper . w_Gt
+
+encodeGe :: BaseWeights -> Encoding
+encodeGe = embedHelper . w_Ge
+
+encodeAnd :: BaseWeights -> Encoding
+encodeAnd = embedHelper . w_And
+
+encodeOr :: BaseWeights -> Encoding
+encodeOr = embedHelper . w_Or
+
+encodeImplies :: BaseWeights -> Encoding
+encodeImplies = embedHelper . w_Implies
+
+encodeIff :: BaseWeights -> Encoding
+encodeIff = embedHelper . w_Iff
+
+encodeUnion :: BaseWeights -> Encoding
+encodeUnion = embedHelper . w_Union
+
+encodeIntersect :: BaseWeights -> Encoding
+encodeIntersect = embedHelper . w_Intersect
+
+encodeDiff :: BaseWeights -> Encoding
+encodeDiff = embedHelper . w_Diff
+
+encodeMember :: BaseWeights -> Encoding
+encodeMember = embedHelper . w_Member
+
+encodeSubset :: BaseWeights -> Encoding
+encodeSubset = embedHelper . w_Subset
+
+pattern TensorSpec = LinearSpec
+instance Randomizable () BaseWeights where
+    sample ()
+      = BaseWeights
+     <$> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample TensorSpec
+     <*> sample LinearSpec
+     <*> sample TensorSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample TensorSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample TensorSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample LinearSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+
+monadic :: (a -> Production 1) -> a -> Encoding -> Encoding
+monadic k bw a = relu . forward (k bw) $ a
+
+dyadic :: HasCallStack => (a -> Production 2) -> a -> Encoding -> Encoding -> Encoding
+dyadic k bw a b
+  | U.requiresGrad (toDynamic a) == U.requiresGrad (toDynamic b) = relu . forward (k bw) $ cat @0 (a :. b :. HNil)
+  | otherwise = error "dyadic"
+
+triadic :: HasCallStack => (a -> Production 3) -> a -> Encoding -> Encoding -> Encoding -> Encoding
+triadic k bw a b c
+  | U.requiresGrad (toDynamic a) == U.requiresGrad (toDynamic b)
+  , U.requiresGrad (toDynamic b) == U.requiresGrad (toDynamic c)
+  = relu . forward (k bw) $ cat @0 (a :. b :. c :. HNil)
+  | otherwise = error "triadic"
+
+-- Primitives
+encodeLCons :: BaseWeights -> Encoding -> Encoding -> Encoding
+encodeLCons = dyadic w_lcons
+
+encodePair :: BaseWeights -> Encoding -> Encoding -> Encoding
+encodePair = dyadic w_pair
+
+encodeId :: Env -> BaseWeights -> Id -> Encoding
+encodeId _ bw id = relu . forward (w_intl bw) $ encodeInt bw (hash id)
+
+encodeInt :: BaseWeights -> Int -> Encoding
+encodeInt _ i = UnsafeMkTensor $ U.asTensor $ fromIntegral i : replicate 9 (0.0 :: Float)
+
+encodeBool :: BaseWeights -> Bool -> Encoding
+encodeBool _ True  = UnsafeMkTensor $ U.asTensor $ 1.0 : replicate 9 (0.0 :: Float)
+encodeBool _ False = UnsafeMkTensor $ U.asTensor $ 0.0 : 1.0 : replicate 8 (0.0 :: Float)
+
+encodeBool' :: Bool -> Tensor Dev DT '[2]
+encodeBool' True  = UnsafeMkTensor $ U.asTensor $ [1,0 :: Float]
+encodeBool' False = UnsafeMkTensor $ U.asTensor $ [0,1 :: Float]
+ 
+-- TypeSkeleton
+encodeScalarT :: BaseWeights -> Encoding -> Encoding -> Encoding
+encodeScalarT = dyadic w_scalart
+
+encodeFunctionT :: BaseWeights -> Encoding -> Encoding -> Encoding -> Encoding
+encodeFunctionT = triadic w_functiont
+
+encodeLetT :: BaseWeights -> Encoding -> Encoding -> Encoding -> Encoding
+encodeLetT = triadic w_lett
+
+-- BaseType
+encodeTypeVarT :: BaseWeights -> Encoding -> Encoding
+encodeTypeVarT = monadic w_tyvart
+
+encodeDatatype :: BaseWeights -> Encoding -> Encoding -> Encoding -> Encoding
+encodeDatatype = triadic w_dttype
+
+-- Sorts
+encodeVarS :: BaseWeights -> Encoding -> Encoding
+encodeVarS = monadic w_vars
+
+encodeDataS :: BaseWeights -> Encoding -> Encoding -> Encoding
+encodeDataS = dyadic w_datas
+
+encodeSetS :: BaseWeights -> Encoding -> Encoding
+encodeSetS = monadic w_sets
+
+-- Formula
+encodeAll :: BaseWeights -> Encoding -> Encoding -> Encoding
+encodeAll = dyadic w_all
+
+encodeCons :: BaseWeights -> Encoding -> Encoding -> Encoding -> Encoding
+encodeCons = triadic w_cons
+
+encodePred :: BaseWeights -> Encoding -> Encoding -> Encoding -> Encoding
+encodePred = triadic w_pred
+
+encodeIte :: BaseWeights -> Encoding -> Encoding -> Encoding -> Encoding
+encodeIte = triadic w_ite
+
+encodeBinary :: BaseWeights -> Encoding -> Encoding -> Encoding -> Encoding
+encodeBinary = triadic w_bin
+
+encodeUnary :: BaseWeights -> Encoding -> Encoding -> Encoding
+encodeUnary = dyadic w_unary
+
+encodeUnknown :: BaseWeights -> Encoding -> Encoding -> Encoding
+encodeUnknown = dyadic w_unknown
+
+encodeVar :: BaseWeights -> Encoding -> Encoding -> Encoding
+encodeVar = dyadic w_var
+
+encodeSetLit :: BaseWeights -> Encoding -> Encoding -> Encoding
+encodeSetLit = dyadic w_setl
+
+encodeIntLit :: BaseWeights -> Encoding -> Encoding
+encodeIntLit = monadic w_intl
+
+encodeBoolLit :: BaseWeights -> Encoding -> Encoding
+encodeBoolLit = monadic w_booll
+
+encodePS :: BaseWeights -> Encoding -> Encoding -> Encoding -> Encoding
+encodePS = triadic w_predsig
 
 -- | Sorts
 data Sort = BoolS | IntS | VarS Id | DataS Id [Sort] | SetS Sort | AnyS
   deriving (Show, Eq, Ord)
+
+instance Encode Sort where
+  encode env bw t = case t of
+    BoolS -> encodeBoolS bw
+    IntS -> encodeIntS bw
+    VarS x -> encodeVarS bw (encodeId env bw x)
+    DataS id xs -> encodeDataS bw (encodeId env bw id) (encode env bw xs)
+    SetS x -> encodeSetS bw (encode env bw x)
+    AnyS -> encodeAnyS bw
 
 isSetS (SetS _) = True
 isSetS _ = False
@@ -93,11 +499,18 @@ data PredSig = PredSig {
   predSigResSort :: Sort
 } deriving (Show, Eq, Ord)
 
+instance Encode PredSig where
+  encode env bw (PredSig id xs t) = encodePS bw (encodeId env bw id) (encode env bw xs) (encode env bw t)
+
 {- Formulas of the refinement logic -}
 
 -- | Unary operators
 data UnOp = Neg | Not
   deriving (Show, Eq, Ord)
+
+instance Encode UnOp where
+  encode _ bw Neg = encodeNeg bw
+  encode _ bw Not = encodeNot bw
 
 -- | Binary operators
 data BinOp =
@@ -108,6 +521,27 @@ data BinOp =
     Union | Intersect | Diff |      -- ^ Set -> Set -> Set
     Member | Subset                 -- ^ Int/Set -> Set -> Bool
   deriving (Show, Eq, Ord)
+
+instance Encode BinOp where
+  encode _ bw t = case t of
+    Times -> encodeTimes bw
+    Plus -> encodePlus bw
+    Minus -> encodeMinus bw
+    Eq -> encodeEq bw
+    Neq -> encodeNeq bw
+    Lt -> encodeLt bw
+    Le -> encodeLe bw
+    Gt -> encodeGt bw
+    Ge -> encodeGe bw
+    And -> encodeAnd bw
+    Or -> encodeOr bw
+    Implies -> encodeImplies bw
+    Iff -> encodeIff bw
+    Union -> encodeUnion bw
+    Intersect -> encodeIntersect bw
+    Diff -> encodeDiff bw
+    Member -> encodeMember bw
+    Subset -> encodeSubset bw
 
 -- | Variable substitution
 type Substitution = Map Id Formula
@@ -126,6 +560,20 @@ data Formula =
   Cons Sort Id [Formula] |            -- ^ Constructor application
   All Formula Formula                 -- ^ Universal quantification
   deriving (Show, Eq, Ord)
+
+instance Encode Formula where
+  encode env bw t = case t of
+    BoolLit b -> encodeBoolLit bw (encodeBool bw b)
+    IntLit i -> encodeIntLit bw (encodeInt bw $ fromIntegral i)
+    SetLit s xs -> encodeSetLit bw (encode env bw s) (encode env bw xs)
+    Var s id -> encodeVar bw (encode env bw s) (encodeId env bw id)
+    Unknown subst id -> encodeUnknown bw (encode env bw $ map (over _1 (encodeId env bw)) $ Map.toList subst) (encodeId env bw id)
+    Unary op f -> encodeUnary bw (encode env bw op) (encode env bw f)
+    Binary op a b -> encodeBinary bw (encode env bw op) (encode env bw a) (encode env bw b)
+    Ite a b c -> encodeIte bw (encode env bw a) (encode env bw b) (encode env bw c)
+    Pred s id xs -> encodePred bw (encode env bw s) (encodeId env bw id) (encode env bw xs)
+    Cons s id xs -> encodeCons bw (encode env bw s) (encodeId env bw id) (encode env bw xs)
+    All a b -> encodeAll bw (encode env bw a) (encode env bw b)
 
 dontCare = "_"
 valueVarName = "_v"

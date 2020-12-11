@@ -22,6 +22,7 @@ import System.Exit
 import System.Console.CmdArgs
 import System.Console.ANSI
 import System.FilePath
+import System.Directory
 import Data.Char
 import Data.Time.Calendar
 import Data.Map ((!))
@@ -41,6 +42,7 @@ releaseDate = fromGregorian 2016 8 11
 -- | Type-check and synthesize a program, according to command-line arguments
 main = do
   res <- cmdArgsRun $ mode
+  params <- getParams "synquid-model"
   case res of
     (Synthesis file libs onlyGoals
                appMax scrutineeMax matchMax auxMax fix genPreds explicitMatch unfoldLocals partial incremental consistency memoize symmetry
@@ -61,7 +63,8 @@ main = do
                     _consistencyChecking = consistency,
                     _useMemoization = memoize,
                     _symmetryReduction = symmetry,
-                    _explorerLogLevel = log_
+                    _explorerLogLevel = log_,
+                    _modelweights = params
                     }
                   let solverParams = defaultHornSolverParams {
                     isLeastFixpoint = lfp,

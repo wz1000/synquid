@@ -1,3 +1,4 @@
+{-# LANGUAGE RecordWildCards #-}
 -- | Refinement Types
 module Synquid.Type where
 
@@ -14,11 +15,27 @@ import qualified Data.Map as Map
 import Data.Map (Map)
 import Control.Monad
 import Control.Lens hiding (set)
+import qualified Torch as T
+import Torch (Tensor)
 
 {- Type skeletons -}
 
 data BaseType r = BoolT | IntT | DatatypeT Id [TypeSkeleton r] [r] | TypeVarT Substitution Id
   deriving (Show, Eq, Ord)
+
+instance Encode r => Encode (BaseType r) where
+  encode env bw t= case t of
+    BoolT -> encodeBoolT bw
+    IntT -> encodeIntT bw
+    DatatypeT id ts rs -> encodeDatatype bw (encodeId env bw id) (encode env bw ts) (encode env bw rs)
+    TypeVarT _ id -> encodeTypeVarT bw (encodeId env bw id)
+
+instance Encode r => Encode (TypeSkeleton r) where
+  encode env bw t = case t of
+    ScalarT bt r -> encodeScalarT bw (encode env bw bt) (encode env bw r)
+    FunctionT id a b -> encodeFunctionT bw (encodeId env bw id) (encode env bw a) (encode env bw b)
+    LetT id a b -> encodeLetT bw (encodeId env bw id) (encode env bw a) (encode env bw b)
+    AnyT -> encodeAnyT bw
 
 -- | Type skeletons (parametrized by refinements)
 data TypeSkeleton r =
@@ -135,6 +152,21 @@ data SchemaSkeleton r =
   ForallT Id (SchemaSkeleton r) |       -- Type-polymorphic
   ForallP PredSig (SchemaSkeleton r)    -- Predicate-polymorphic
   deriving (Show, Eq, Ord)
+
+instance Encode r => Encode (SchemaSkeleton r) where
+  encode env bw t = case t of
+    Monotype t -> encodeMonotype bw (encode env bw t)
+    ForallT id sk -> encodeForallT bw (encodeId env bw id) (encode env bw sk)
+    ForallP ps sk -> encodeForallP bw (encode env bw ps) (encode env bw sk)
+
+encodeMonotype :: BaseWeights -> Encoding -> Encoding
+encodeMonotype = monadic w_monotype
+
+encodeForallT :: BaseWeights -> Encoding -> Encoding -> Encoding
+encodeForallT = dyadic w_forallt
+
+encodeForallP :: BaseWeights -> Encoding -> Encoding -> Encoding
+encodeForallP = dyadic w_forallp
 
 toMonotype :: SchemaSkeleton r -> TypeSkeleton r
 toMonotype (Monotype t) = t

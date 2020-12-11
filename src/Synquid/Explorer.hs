@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, FlexibleContexts, TupleSections #-}
+{-# LANGUAGE TemplateHaskell, FlexibleContexts, TupleSections, DeriveFunctor #-}
 
 -- | Generating synthesis constraints from specifications, qualifiers, and program templates
 module Synquid.Explorer where
@@ -19,6 +19,7 @@ import Data.List
 import qualified Data.Set as Set
 import Data.Set (Set)
 import qualified Data.Map as Map
+import Data.Map.Internal.Debug (showTree)
 import Data.Map (Map)
 import Data.Char
 import Control.Monad.Logic
@@ -27,6 +28,8 @@ import Control.Monad.Reader
 import Control.Applicative hiding (empty)
 import Control.Lens
 import Debug.Trace
+import Data.Unique
+import Data.Bifunctor
 
 {- Interface -}
 
@@ -59,12 +62,19 @@ data ExplorerParams = ExplorerParams {
   _useMemoization :: Bool,                -- ^ Should enumerated terms be memoized?
   _symmetryReduction :: Bool,             -- ^ Should partial applications be memoized to check for redundancy?
   _sourcePos :: SourcePos,                -- ^ Source position of the current goal
-  _explorerLogLevel :: Int                -- ^ How verbose logging is
+  _explorerLogLevel :: Int,                -- ^ How verbose logging is
+  _modelweights :: BaseWeights
 }
 
 makeLenses ''ExplorerParams
 
 type Requirements = Map Id [RType]
+
+newtype WrapEq a = WrapEq {unWrapEq :: a} deriving Functor
+instance Eq (WrapEq a) where
+  _ == _ = True
+instance Ord (WrapEq a) where
+  compare a b = EQ
 
 -- | State of program exploration
 data ExplorerState = ExplorerState {
@@ -73,7 +83,8 @@ data ExplorerState = ExplorerState {
   _solvedAuxGoals :: Map Id RProgram,              -- Synthesized auxiliary goals, to be inserted into the main program
   _lambdaLets :: Map Id (Environment, UProgram),   -- ^ Local bindings to be checked upon use (in type checking mode)
   _requiredTypes :: Requirements,                  -- ^ All types that a variable is required to comply to (in repair mode)
-  _symbolUseCount :: Map Id Int                    -- ^ Number of times each symbol has been used in the program so far
+  _symbolUseCount :: Map Id Int,                   -- ^ Number of times each symbol has been used in the program so far
+  _decisionRecord :: WrapEq (Map Int (Encoding,[(Id,Encoding)]))  -- ^ List of decisions encounterd
 } deriving (Eq, Ord)
 
 makeLenses ''ExplorerState
@@ -88,6 +99,9 @@ data MemoKey = MemoKey {
 instance Pretty MemoKey where
   -- pretty (MemoKey arity t d st) = pretty env <+> text "|-" <+> hsep (replicate arity (text "? ->")) <+> pretty t <+> text "AT" <+> pretty d
   pretty (MemoKey arity t st d) = hsep (replicate arity (text "? ->")) <+> pretty t <+> text "AT" <+> pretty d <+> parens (pretty (st ^. typingState . candidates))
+
+instance (Pretty k, Pretty v) => Pretty (Map k v) where
+  pretty m = pretty $ Map.toList m
 
 -- | Memoization store
 type Memo = Map MemoKey [(RProgram, ExplorerState)]
@@ -114,17 +128,18 @@ type Explorer s = StateT ExplorerState (
 data Reconstructor s = Reconstructor (Goal -> Explorer s RProgram)
 
 -- | 'runExplorer' @eParams tParams initTS go@ : execute exploration @go@ with explorer parameters @eParams@, typing parameters @tParams@ in typing state @initTS@
-runExplorer :: MonadHorn s => ExplorerParams -> TypingParams -> Reconstructor s -> TypingState -> Explorer s a -> s (Either ErrorMessage a)
+runExplorer :: MonadHorn s => ExplorerParams -> TypingParams -> Reconstructor s -> TypingState -> Explorer s a -> s (Either ErrorMessage (a,Map Int (Encoding,[(Id,Encoding)])))
 runExplorer eParams tParams topLevel initTS go = do
-  (ress, (PersistentState _ _ errs)) <- runStateT (observeManyT 1 $ runReaderT (evalStateT go initExplorerState) (eParams, tParams, topLevel)) (PersistentState Map.empty Map.empty [])
+  (ress, (PersistentState _ _ errs)) <- runStateT (observeManyT 1 $ runReaderT (runStateT go initExplorerState) (eParams, tParams, topLevel)) (PersistentState Map.empty Map.empty [])
   case ress of
     [] -> 
       case errs of 
         [] -> return $ Left impossible
         (e:_) -> return $ Left e
-    (res : _) -> return $ Right res
+    ((res,es) : _) -> do
+      return $ Right (res, unWrapEq $ _decisionRecord es)
   where
-    initExplorerState = ExplorerState initTS [] Map.empty Map.empty Map.empty Map.empty
+    initExplorerState = ExplorerState initTS [] Map.empty Map.empty Map.empty Map.empty (WrapEq Map.empty)
     impossible = ErrorMessage {
         emKind = SynthesisError,
         emPosition = _sourcePos eParams,
@@ -202,6 +217,7 @@ generateMatch env t = do
                       $ inContext (\p -> Program (PMatch p []) t)
                       $ generateE env anyDatatype -- Generate a scrutinee of an arbitrary type
       let (env', tScr') = embedContext env tScr
+      traceShowM ("*****************",p)
       let pScrutinee = Program p tScr'
 
       case tScr of
@@ -426,12 +442,16 @@ enumerateAt env typ 0 = do
     let symbols' = filter (\(x, _) -> notElem x setConstructors) $ if arity typ == 0
                       then sortBy (mappedCompare (\(x, _) -> (Set.member x (env ^. constants), Map.findWithDefault 0 x useCounts))) symbols
                       else sortBy (mappedCompare (\(x, _) -> (not $ Set.member x (env ^. constants), Map.findWithDefault 0 x useCounts))) symbols
-    msum $ map pickSymbol symbols'
+    u <- hashUnique <$> liftIO newUnique
+    tass <- use typingState
+    model <- asks (view $ _1 . modelweights)
+    decisionRecord %= fmap (Map.insert u (encode () model typ, map (second (encode () model)) symbols'))
+    msum $ map (pickSymbol u) $ symbols'
   where
-    pickSymbol (name, sch) = do
+    pickSymbol u (name, sch) = do
       when (Set.member name (env ^. letBound)) mzero
       t <- symbolType env name sch
-      let p = Program (PSymbol name) t
+      let p = Program (PSymbol' (Just u) name) t
       writeLog 2 $ text "Trying" <+> pretty p
       symbolUseCount %= Map.insertWith (+) name 1
       case Map.lookup name (env ^. shapeConstraints) of

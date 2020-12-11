@@ -68,6 +68,7 @@ import qualified Data.Map as Map
 import Data.Map (Map, (!))
 import Data.List
 import Debug.Trace
+import Torch.Typed (Tensor)
 
 import Control.Lens
 
@@ -154,6 +155,9 @@ instance Pretty UnOp where
 
 instance Pretty BinOp where
   pretty op = operator $ binOpTokens Map.! op
+
+instance Pretty (Tensor dev dt size) where
+  pretty = text . show
 
 -- | Binding power of a formula
 power :: Formula -> Int
@@ -284,8 +288,8 @@ prettyCase cas = hang tab $ text (constructor cas) <+> hsep (map text $ argNames
 
 prettyProgram :: (Pretty t) => Program t -> Doc
 prettyProgram (Program p typ) = case p of
-    PSymbol s -> case asInteger s of
-                  Nothing -> if s == valueVarName then special s else text s
+    PSymbol' from s -> case asInteger s of
+                  Nothing -> if s == valueVarName then special s else (text s <> text "{" <> maybe mempty pretty from <> text "}")
                   Just n -> intLiteral n
     PApp f x -> let
       optParens p = case p of
@@ -328,12 +332,12 @@ instance Pretty MeasureDef where
 prettyBinding (name, typ) = text name <+> operator "::" <+> pretty typ
 
 prettyAssumptions env = commaSep (map pretty (Set.toList $ env ^. assumptions))
-prettyBindings env = commaSep (map pretty (Map.keys $ removeDomain (env ^. constants) (allSymbols env)))
--- prettyBindings env = hMapDoc pretty pretty (removeDomain (env ^. constants) (allSymbols env))
+-- prettyBindings env = commaSep (map prettyBinding (Map.toList $ (allSymbols env)))
+prettyBindings env = hMapDoc pretty pretty (removeDomain (env ^. constants) (allSymbols env))
 -- prettyBindings env = empty
 
 instance Pretty Environment where
-  pretty env = prettyBindings env <+> prettyAssumptions env
+  pretty env = prettyBindings env <+> prettyAssumptions env <+> pretty (_boundPredicates env) <+> pretty (_boundTypeVars env) <+> pretty (hMapDoc pretty pretty $ _shapeConstraints env)
 
 prettySortConstraint :: SortConstraint -> Doc
 prettySortConstraint (SameSort sl sr) = pretty sl <+> text "=" <+> pretty sr
