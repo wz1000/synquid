@@ -30,11 +30,12 @@ import GHC.Generics (Generic)
 
 import qualified Torch.Tensor as U
 import qualified Torch.NN as U
-import Torch.Typed hiding (DType, Device, shape, sin, any, length, replicate)
+import Torch.Typed hiding (DType, Device, shape, sin, any, length, replicate, round)
 import Torch (requiresGrad)
 import qualified Torch.Functional as U
 import qualified Torch.Autograd as U
 import GHC.Exts (IsList(toList))
+import qualified Torch.Functional.Internal as U (equal)
 
 -- | 'reconstruct' @eParams tParams goal@ : reconstruct missing types and terms in the body of @goal@ so that it represents a valid type judgment;
 -- return a type error if that is impossible
@@ -53,9 +54,9 @@ reconstruct eParams tParams goal = do
       p <- flip insertAuxSolutions pMain <$> use solvedAuxGoals            -- Insert solutions for auxiliary goals stored in @solvedAuxGoals@
       runInSolver $ finalizeProgram p                                      -- Substitute all type/predicates variables and unknowns
 
-trainAndWriteModel :: MonadIO s => RProgram -> Map Int (Encoding, [(Id,Encoding)]) -> BaseWeights  -> s ()
+trainAndWriteModel :: MonadIO s => RProgram -> Decisions -> BaseWeights  -> s ()
 trainAndWriteModel prog decisions model = liftIO $ do
-  let examples = map (\(a,b,c) -> (reshape $ if (requiresGrad (toDynamic a) == requiresGrad (toDynamic b)) then cat @0 (a :. b :. HNil) else error "examples", c)) $ collectData prog decisions
+  let examples = collectData prog decisions
   when (not $ null examples) $ do
     let
         maxLearningRate = 1e-2
@@ -86,59 +87,22 @@ trainAndWriteModel prog decisions model = liftIO $ do
           (model',optim') <- train model optim learningRate examples
           pure (model', optim', epoch+1)
 
-    print examples
-    print $ map (runModel model) (map fst examples)
-    putStrLn "here0"
-    (x,_) <- train model optimInit (learningRateSchedule 0) examples
-    print x
-    -- putStrLn "here1"
-    -- (model',_optim',_epochs') <- loop numEpochs step init
-    -- -- print model'
-    -- putStrLn "here"
-    -- -- saveParams "synquid-model.pt" model'
-    --
-    -- x <- sample TM
-    -- let optimInit' = mkAdam 0 0.9 0.999 (flattenParameters x)
-    --     ten = UnsafeMkTensor $ U.asTensor $ replicate 10 (0.0 :: Float)
-    -- (x',_) <- train' x optimInit' (1e-2) [(ten,True)]
-    -- pure ()
+    (model',_optim',_epochs') <- loop numEpochs step init
+    let res = map (runModel' model' . fst) examples
+        yact = map (encodeBool' . snd) examples
+        re = zipWith (\x y -> (round (toFloat $ reshape x),round (toFloat $ reshape y))) res yact
+        count = length $ filter (uncurry (==)) re
+    print (count,length yact)
+    print re
+    -- saveParams "synquid-model.pt" model'
+    pure ()
 
-data TestModel = TestModel { l1 :: Layer 20 2, l2 :: Layer 0 10 } deriving (Show, Generic, Parameterized)
-
-runTest :: TestModel -> Tensor Dev DT '[10] -> Tensor Dev DT '[2]
-runTest (TestModel l1 l2) x = forward l1 . relu $ (cat @0 (x :. (toDependent $ linearBias l2) :. HNil))
-
+runModel' :: BaseWeights -> (RType,RSchema) -> Tensor Dev DT '[1]
+runModel' bw (target,cand) = runModel bw $ cat @0 (encode () bw target :. encode () bw cand :. HNil)
 
 data Untype = Untype
 instance Apply' Untype (Parameter device dtype shape) (U.Parameter) where
   apply' _ = untypeParam
-
--- | Train the model for one epoch
-train' ::
-  _ =>
-  -- | initial model datatype holding the weights
-  TestModel ->
-  -- | initial optimizer, e.g. Adam
-  optim ->
-  -- | learning rate, 'LearningRate device dtype' is a type alias for 'Tensor device dtype '[]'
-  LearningRate Dev DT ->
-  -- | stream of training examples consisting of inputs and outputs
-  [(Tensor Dev DT '[10], Bool)] ->
-  -- | final model and optimizer
-  IO (TestModel, optim)
-train' model optim learningRate examples =
-  let -- training step function
-      step (x,yp) (model,optim) =
-        let y' = runTest model x
-            loss = mseLoss @'ReduceMean y' (reshape $ encodeBool' yp)
-            useless = mulScalar (0:: Float) ( UnsafeMkTensor $ sum $ map U.sumAll $ map U.toDependent $ toList . Just . hmap' Untype . flattenParameters $ model)
-          in runStep model optim loss learningRate
-   in -- training is a fold over the 'examples' stream
-      F.foldrM step (model,optim) $ examples
-
-data TM = TM
-instance Randomizable TM TestModel where
-  sample TM = TestModel <$> sample LinearSpec <*> sample LinearSpec
 
 loop :: Monad m => Int -> (a -> m a) -> a -> m a
 loop n f = foldr (<=<) pure (replicate n f)
@@ -153,25 +117,27 @@ train ::
   -- | learning rate, 'LearningRate device dtype' is a type alias for 'Tensor device dtype '[]'
   LearningRate Dev DT ->
   -- | stream of training examples consisting of inputs and outputs
-  [(Tensor Dev DT [1,2*Size], Bool)] ->
+  [((RType,RSchema), Bool)] ->
   -- | final model and optimizer
   IO (BaseWeights, optim)
 train model optim learningRate examples =
   let -- training step function
-      step (x,yp) (model,optim) =
-        let y' = runModel model x
-            loss = useless + mseLoss @'ReduceMean y' (reshape $ encodeBool' yp)
+      step (x,yact') (model,optim) = do
+        let y' = runModel' model x
+            yact = encodeBool' yact'
+            loss = useless + binaryCrossEntropy @'ReduceMean ones y' yact
             useless = mulScalar (0:: Float) ( UnsafeMkTensor $ sum $ map U.sumAll $ map U.toDependent $ toList . Just . hmap' Untype . flattenParameters $ model)
-          in runStep model optim loss learningRate
+        print ("Loss",loss,y',yact)
+        runStep model optim loss learningRate
    in -- training is a fold over the 'examples' stream
       F.foldrM step (model,optim) $ examples
 
-collectData :: RProgram -> Map Int (Encoding, [(Id, Encoding)]) -> [(Encoding,Encoding,Bool)]
+collectData :: RProgram -> Decisions -> [((RType,RSchema),Bool)]
 collectData prog decisions = go prog
   where
     go (Program p _) = case p of
       PSymbol' (Just prov) id ->
-        [ (target,cand,symbol == id) | let (target,xs) = decisions Map.! prov, (symbol,cand) <- xs ]
+        [ ((target,cand),symbol == id) | let (target,xs) = decisions Map.! prov, (symbol,cand) <- xs ]
       PSymbol' Nothing _ -> []
       PApp a b -> go a ++ go b
       PFun _ b -> go b

@@ -84,8 +84,10 @@ data ExplorerState = ExplorerState {
   _lambdaLets :: Map Id (Environment, UProgram),   -- ^ Local bindings to be checked upon use (in type checking mode)
   _requiredTypes :: Requirements,                  -- ^ All types that a variable is required to comply to (in repair mode)
   _symbolUseCount :: Map Id Int,                   -- ^ Number of times each symbol has been used in the program so far
-  _decisionRecord :: WrapEq (Map Int (Encoding,[(Id,Encoding)]))  -- ^ List of decisions encounterd
+  _decisionRecord :: WrapEq Decisions  -- ^ List of decisions encounterd
 } deriving (Eq, Ord)
+
+type Decisions = Map Int (RType,[(Id,RSchema)])
 
 makeLenses ''ExplorerState
 
@@ -128,7 +130,7 @@ type Explorer s = StateT ExplorerState (
 data Reconstructor s = Reconstructor (Goal -> Explorer s RProgram)
 
 -- | 'runExplorer' @eParams tParams initTS go@ : execute exploration @go@ with explorer parameters @eParams@, typing parameters @tParams@ in typing state @initTS@
-runExplorer :: MonadHorn s => ExplorerParams -> TypingParams -> Reconstructor s -> TypingState -> Explorer s a -> s (Either ErrorMessage (a,Map Int (Encoding,[(Id,Encoding)])))
+runExplorer :: MonadHorn s => ExplorerParams -> TypingParams -> Reconstructor s -> TypingState -> Explorer s a -> s (Either ErrorMessage (a,Decisions))
 runExplorer eParams tParams topLevel initTS go = do
   (ress, (PersistentState _ _ errs)) <- runStateT (observeManyT 1 $ runReaderT (runStateT go initExplorerState) (eParams, tParams, topLevel)) (PersistentState Map.empty Map.empty [])
   case ress of
@@ -445,7 +447,7 @@ enumerateAt env typ 0 = do
     u <- hashUnique <$> liftIO newUnique
     tass <- use typingState
     model <- asks (view $ _1 . modelweights)
-    decisionRecord %= fmap (Map.insert u (encode () model typ, map (second (encode () model)) symbols'))
+    decisionRecord %= fmap (Map.insert u (typ, symbols'))
     msum $ map (pickSymbol u) $ symbols'
   where
     pickSymbol u (name, sch) = do

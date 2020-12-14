@@ -3,6 +3,8 @@
 -- | Formulas of the refinement logic
 module Synquid.Logic where
 
+import Prelude hiding (tanh)
+
 import Synquid.Util
 
 import Data.Tuple
@@ -81,17 +83,17 @@ type Layer inp out = Linear inp out DT Dev
 type Production n = Layer (n*Size) Size
 type Terminal = Production 1
 
-runModel :: forall batch. BaseWeights -> Tensor Dev DT '[batch,2*Size] -> Tensor Dev DT '[batch,2]
+runModel :: BaseWeights -> Tensor Dev DT '[2*Size] -> Tensor Dev DT '[1]
 runModel BaseWeights{layer2,layer1,layer0}
-  = softmax @1
+  = sigmoid
   . forward layer2
   . relu
   . forward layer1
-  . relu
+  . tanh
   . forward layer0
 
 data BaseWeights = BaseWeights
-  { layer2 :: Layer 16 2
+  { layer2 :: Layer 16 1
   , layer1 :: Layer 64 16
   , layer0 :: Layer (2*Size) 64
 
@@ -105,6 +107,7 @@ data BaseWeights = BaseWeights
   , w_monotype :: Production 1
   , w_forallt :: Production 2
   , w_forallp :: Production 2
+
 -- TypeSkeleton
   , w_scalart :: Production 2
   , w_functiont :: Production 3
@@ -315,18 +318,18 @@ instance Randomizable () BaseWeights where
      <*> sample TensorSpec
 
 monadic :: (a -> Production 1) -> a -> Encoding -> Encoding
-monadic k bw a = relu . forward (k bw) $ a
+monadic k bw a = tanh . forward (k bw) $ a
 
 dyadic :: HasCallStack => (a -> Production 2) -> a -> Encoding -> Encoding -> Encoding
 dyadic k bw a b
-  | U.requiresGrad (toDynamic a) == U.requiresGrad (toDynamic b) = relu . forward (k bw) $ cat @0 (a :. b :. HNil)
+  | U.requiresGrad (toDynamic a) == U.requiresGrad (toDynamic b) = tanh . forward (k bw) $ cat @0 (a :. b :. HNil)
   | otherwise = error "dyadic"
 
 triadic :: HasCallStack => (a -> Production 3) -> a -> Encoding -> Encoding -> Encoding -> Encoding
 triadic k bw a b c
   | U.requiresGrad (toDynamic a) == U.requiresGrad (toDynamic b)
   , U.requiresGrad (toDynamic b) == U.requiresGrad (toDynamic c)
-  = relu . forward (k bw) $ cat @0 (a :. b :. c :. HNil)
+  = tanh . forward (k bw) $ cat @0 (a :. b :. c :. HNil)
   | otherwise = error "triadic"
 
 -- Primitives
@@ -337,7 +340,7 @@ encodePair :: BaseWeights -> Encoding -> Encoding -> Encoding
 encodePair = dyadic w_pair
 
 encodeId :: Env -> BaseWeights -> Id -> Encoding
-encodeId _ bw id = relu . forward (w_intl bw) $ encodeInt bw (hash id)
+encodeId _ bw id = tanh . forward (w_intl bw) $ encodeInt bw (hash id)
 
 encodeInt :: BaseWeights -> Int -> Encoding
 encodeInt _ i = UnsafeMkTensor $ U.asTensor $ fromIntegral i : replicate 9 (0.0 :: Float)
@@ -346,9 +349,9 @@ encodeBool :: BaseWeights -> Bool -> Encoding
 encodeBool _ True  = UnsafeMkTensor $ U.asTensor $ 1.0 : replicate 9 (0.0 :: Float)
 encodeBool _ False = UnsafeMkTensor $ U.asTensor $ 0.0 : 1.0 : replicate 8 (0.0 :: Float)
 
-encodeBool' :: Bool -> Tensor Dev DT '[2]
-encodeBool' True  = UnsafeMkTensor $ U.asTensor $ [1,0 :: Float]
-encodeBool' False = UnsafeMkTensor $ U.asTensor $ [0,1 :: Float]
+encodeBool' :: Bool -> Tensor Dev DT '[1]
+encodeBool' True  = full (1 :: Float)
+encodeBool' False = full (0 :: Float)
  
 -- TypeSkeleton
 encodeScalarT :: BaseWeights -> Encoding -> Encoding -> Encoding
