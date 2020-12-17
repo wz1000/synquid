@@ -33,6 +33,7 @@ executable synquid
                     , Synquid.Explorer
                     , Synquid.Synthesizer
                     , Synquid.TypeChecker
+                    , Synquid.Train
                     , Synquid.Tokens
                     , Synquid.Type
                     , Synquid.Util
@@ -67,6 +68,7 @@ executable synquid
                     , hasktorch
                     , safe
                     , split
+                    , compact
 
   ghc-options: -O2
 

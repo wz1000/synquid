@@ -21,7 +21,7 @@ import Torch (Tensor)
 {- Type skeletons -}
 
 data BaseType r = BoolT | IntT | DatatypeT Id [TypeSkeleton r] [r] | TypeVarT Substitution Id
-  deriving (Show, Eq, Ord)
+  deriving (Show,Read, Eq, Ord)
 
 instance Encode r => Encode (BaseType r) where
   encode env bw t= case t of
@@ -43,7 +43,7 @@ data TypeSkeleton r =
   FunctionT Id (TypeSkeleton r) (TypeSkeleton r) |
   LetT Id (TypeSkeleton r) (TypeSkeleton r) |
   AnyT
-  deriving (Show, Eq, Ord)
+  deriving (Show,Read, Eq, Ord)
 
 contextual x tDef (FunctionT y tArg tRes) = FunctionT y (contextual x tDef tArg) (contextual x tDef tRes)
 contextual _ _ AnyT = AnyT
@@ -151,7 +151,7 @@ data SchemaSkeleton r =
   Monotype (TypeSkeleton r) |
   ForallT Id (SchemaSkeleton r) |       -- Type-polymorphic
   ForallP PredSig (SchemaSkeleton r)    -- Predicate-polymorphic
-  deriving (Show, Eq, Ord)
+  deriving (Show, Eq, Read, Ord)
 
 instance Encode r => Encode (SchemaSkeleton r) where
   encode env bw t = case t of

@@ -219,7 +219,6 @@ generateMatch env t = do
                       $ inContext (\p -> Program (PMatch p []) t)
                       $ generateE env anyDatatype -- Generate a scrutinee of an arbitrary type
       let (env', tScr') = embedContext env tScr
-      traceShowM ("*****************",p)
       let pScrutinee = Program p tScr'
 
       case tScr of

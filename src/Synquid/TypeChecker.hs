@@ -27,15 +27,7 @@ import qualified Text.PrettyPrint.ANSI.Leijen as L
 import Debug.Trace
 import GHC.TypeLits (type (*))
 import GHC.Generics (Generic)
-
-import qualified Torch.Tensor as U
-import qualified Torch.NN as U
-import Torch.Typed hiding (DType, Device, shape, sin, any, length, replicate, round)
-import Torch (requiresGrad)
-import qualified Torch.Functional as U
-import qualified Torch.Autograd as U
-import GHC.Exts (IsList(toList))
-import qualified Torch.Functional.Internal as U (equal)
+import Synquid.Train
 
 -- | 'reconstruct' @eParams tParams goal@ : reconstruct missing types and terms in the body of @goal@ so that it represents a valid type judgment;
 -- return a type error if that is impossible
@@ -46,108 +38,15 @@ reconstruct eParams tParams goal = do
     case res of
       Left x -> pure (Left x)
       Right (prog,d) -> do
-        trainAndWriteModel prog d (_modelweights eParams)
+        let examples = collectData prog d
+        liftIO $ writeData "dataset" examples
+        -- trainAndWriteModel prog d (_modelweights eParams)
         pure (Right prog)
   where
     go = do
       pMain <- reconstructTopLevel goal { gDepth = _auxDepth eParams }     -- Reconstruct the program
       p <- flip insertAuxSolutions pMain <$> use solvedAuxGoals            -- Insert solutions for auxiliary goals stored in @solvedAuxGoals@
       runInSolver $ finalizeProgram p                                      -- Substitute all type/predicates variables and unknowns
-
-trainAndWriteModel :: MonadIO s => RProgram -> Decisions -> BaseWeights  -> s ()
-trainAndWriteModel prog decisions model = liftIO $ do
-  let examples = collectData prog decisions
-  when (not $ null examples) $ do
-    let
-        maxLearningRate = 1e-2
-        finalLearningRate = 1e-4
-        numEpochs = 100
-        numWarmupEpochs = 10
-        numCooldownEpochs = 10
-
-        -- single-cycle learning rate schedule, see for instance https://arxiv.org/abs/1803.09820
-        learningRateSchedule epoch
-          | epoch <= 0 = 0.0
-          | 0 < epoch && epoch <= numWarmupEpochs =
-            let a :: Float = fromIntegral epoch / fromIntegral numWarmupEpochs
-             in mulScalar a maxLearningRate
-          | numWarmupEpochs < epoch && epoch < numEpochs - numCooldownEpochs =
-            let a :: Float =
-                  fromIntegral (numEpochs - numCooldownEpochs - epoch)
-                    / fromIntegral (numEpochs - numCooldownEpochs - numWarmupEpochs)
-             in mulScalar a maxLearningRate + mulScalar (1 - a) finalLearningRate
-          | otherwise = finalLearningRate
-
-        optimInit = mkAdam 0 0.9 0.999 (flattenParameters model)
-        init = (model, optimInit, 0)
-
-        step (model,optim,epoch) = do
-          let learningRate = learningRateSchedule epoch
-              _ = optim `asTypeOf` optimInit
-          (model',optim') <- train model optim learningRate examples
-          pure (model', optim', epoch+1)
-
-    (model',_optim',_epochs') <- loop numEpochs step init
-    let res = map (runModel' model' . fst) examples
-        yact = map (encodeBool' . snd) examples
-        re = zipWith (\x y -> (round (toFloat $ reshape x),round (toFloat $ reshape y))) res yact
-        count = length $ filter (uncurry (==)) re
-    print (count,length yact)
-    print re
-    -- saveParams "synquid-model.pt" model'
-    pure ()
-
-runModel' :: BaseWeights -> (RType,RSchema) -> Tensor Dev DT '[1]
-runModel' bw (target,cand) = runModel bw $ cat @0 (encode () bw target :. encode () bw cand :. HNil)
-
-data Untype = Untype
-instance Apply' Untype (Parameter device dtype shape) (U.Parameter) where
-  apply' _ = untypeParam
-
-loop :: Monad m => Int -> (a -> m a) -> a -> m a
-loop n f = foldr (<=<) pure (replicate n f)
-
--- | Train the model for one epoch
-train ::
-  _ =>
-  -- | initial model datatype holding the weights
-  BaseWeights ->
-  -- | initial optimizer, e.g. Adam
-  optim ->
-  -- | learning rate, 'LearningRate device dtype' is a type alias for 'Tensor device dtype '[]'
-  LearningRate Dev DT ->
-  -- | stream of training examples consisting of inputs and outputs
-  [((RType,RSchema), Bool)] ->
-  -- | final model and optimizer
-  IO (BaseWeights, optim)
-train model optim learningRate examples =
-  let -- training step function
-      step (x,yact') (model,optim) = do
-        let y' = runModel' model x
-            yact = encodeBool' yact'
-            loss = useless + binaryCrossEntropy @'ReduceMean ones y' yact
-            useless = mulScalar (0:: Float) ( UnsafeMkTensor $ sum $ map U.sumAll $ map U.toDependent $ toList . Just . hmap' Untype . flattenParameters $ model)
-        print ("Loss",loss,y',yact)
-        runStep model optim loss learningRate
-   in -- training is a fold over the 'examples' stream
-      F.foldrM step (model,optim) $ examples
-
-collectData :: RProgram -> Decisions -> [((RType,RSchema),Bool)]
-collectData prog decisions = go prog
-  where
-    go (Program p _) = case p of
-      PSymbol' (Just prov) id ->
-        [ ((target,cand),symbol == id) | let (target,xs) = decisions Map.! prov, (symbol,cand) <- xs ]
-      PSymbol' Nothing _ -> []
-      PApp a b -> go a ++ go b
-      PFun _ b -> go b
-      PIf a b c -> go a ++ go b ++ go c
-      PMatch a xs -> go a ++ concatMap (go . expr) xs
-      PFix _ a -> go a
-      PLet _ a b -> go a ++ go b
-      PHole -> []
-      PErr -> []
-
 
 reconstructTopLevel :: MonadHorn s => Goal -> Explorer s RProgram
 reconstructTopLevel (Goal funName env (ForallT a sch) impl depth pos s) = reconstructTopLevel (Goal funName (addTypeVar a env) sch impl depth pos s)

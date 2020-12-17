@@ -83,8 +83,11 @@ type Layer inp out = Linear inp out DT Dev
 type Production n = Layer (n*Size) Size
 type Terminal = Production 1
 
-runModel :: BaseWeights -> Tensor Dev DT '[2*Size] -> Tensor Dev DT '[1]
-runModel BaseWeights{layer2,layer1,layer0}
+runModel :: (Encode a, Encode b) => BaseWeights -> (a,b) -> Tensor Dev DT '[1]
+runModel bw (target,cand) = runModelTop bw $ cat @0 (encode () bw target :. encode () bw cand :. HNil)
+
+runModelTop :: BaseWeights -> Tensor Dev DT '[2*Size] -> Tensor Dev DT '[1]
+runModelTop BaseWeights{layer2,layer1,layer0}
   = sigmoid
   . forward layer2
   . relu
@@ -419,7 +422,7 @@ encodePS = triadic w_predsig
 
 -- | Sorts
 data Sort = BoolS | IntS | VarS Id | DataS Id [Sort] | SetS Sort | AnyS
-  deriving (Show, Eq, Ord)
+  deriving (Show, Read, Eq, Ord)
 
 instance Encode Sort where
   encode env bw t = case t of
@@ -500,7 +503,7 @@ data PredSig = PredSig {
   predSigName :: Id,
   predSigArgSorts :: [Sort],
   predSigResSort :: Sort
-} deriving (Show, Eq, Ord)
+} deriving (Show, Read, Eq, Ord)
 
 instance Encode PredSig where
   encode env bw (PredSig id xs t) = encodePS bw (encodeId env bw id) (encode env bw xs) (encode env bw t)
@@ -509,7 +512,7 @@ instance Encode PredSig where
 
 -- | Unary operators
 data UnOp = Neg | Not
-  deriving (Show, Eq, Ord)
+  deriving (Show, Read, Eq, Ord)
 
 instance Encode UnOp where
   encode _ bw Neg = encodeNeg bw
@@ -523,7 +526,7 @@ data BinOp =
     And | Or | Implies | Iff |      -- ^ Bool -> Bool -> Bool
     Union | Intersect | Diff |      -- ^ Set -> Set -> Set
     Member | Subset                 -- ^ Int/Set -> Set -> Bool
-  deriving (Show, Eq, Ord)
+  deriving (Show, Read, Eq, Ord)
 
 instance Encode BinOp where
   encode _ bw t = case t of
@@ -562,7 +565,7 @@ data Formula =
   Pred Sort Id [Formula] |            -- ^ Logic function application
   Cons Sort Id [Formula] |            -- ^ Constructor application
   All Formula Formula                 -- ^ Universal quantification
-  deriving (Show, Eq, Ord)
+  deriving (Show,Read, Eq, Ord)
 
 instance Encode Formula where
   encode env bw t = case t of
