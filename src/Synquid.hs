@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable, StandaloneDeriving #-}
+{-# LANGUAGE DeriveDataTypeable, StandaloneDeriving, TypeApplications, DataKinds #-}
 
 module Main where
 
@@ -15,8 +15,10 @@ import Synquid.TypeConstraintSolver
 import Synquid.Explorer
 import Synquid.Synthesizer
 import Synquid.HtmlOutput
-import Synquid.Train (readData, trainAndUpdateModel)
+import Synquid.Train (readData, trainAndUpdateModel, eval)
 
+import qualified Torch.Typed as T
+import Torch.Typed hiding (length, replicate, mode)
 import Control.Monad
 import Control.Lens ((^.))
 import System.Exit
@@ -49,7 +51,7 @@ main = do
                appMax scrutineeMax matchMax auxMax fix genPreds explicitMatch unfoldLocals partial incremental consistency memoize symmetry
                lfp bfs
                out_file out_module outFormat resolve
-               print_spec print_stats log_ train) -> do
+               print_spec print_stats log_ train test) -> do
                   let explorerParams = defaultExplorerParams {
                     _eGuessDepth = appMax,
                     _scrutineeDepth = scrutineeMax,
@@ -82,6 +84,10 @@ main = do
                   if train then do
                     dat <- readData file
                     void $ trainAndUpdateModel params dat
+                  else if test then do
+                    dat <- readData file
+                    let res = map (toFloat . reshape . runModel @1 params . (:. HNil) . fst) dat
+                    print ("eval",eval dat res)
                   else runOnFile synquidParams explorerParams solverParams file libs
 
 {- Command line arguments -}
@@ -126,7 +132,8 @@ data CommandLineArgs
         print_spec :: Bool,
         print_stats :: Bool,
         log_ :: Int,
-        train :: Bool
+        train :: Bool,
+        test :: Bool
       }
   deriving (Data, Typeable, Show, Eq)
 
@@ -156,7 +163,8 @@ synt = Synthesis {
   print_spec          = True            &= help ("Show specification of each synthesis goal (default: True)"),
   print_stats         = False           &= help ("Show specification and solution size (default: False)"),
   log_                = 0               &= help ("Logger verboseness level (default: 0)") &= name "l",
-  train               = False           &= help ("Train from file instead of synthesizing") &= name "train"
+  train               = False           &= help ("Train from file instead of synthesizing") &= name "train",
+  test                = False           &= help ("Test model against dataset") &= name "test"
   } &= auto &= help "Synthesize goals specified in the input file"
     where
       defaultFormat = outputFormat defaultSynquidParams

@@ -1,6 +1,6 @@
 -- | Refinement type reconstruction for programs with holes
-{-# LANGUAGE PartialTypeSignatures, ScopedTypeVariables, FlexibleContexts, GADTs, TypeApplications, DataKinds, NoStarIsType,TypeOperators, DeriveAnyClass, DeriveGeneric, MultiParamTypeClasses, TypeSynonymInstances, AllowAmbiguousTypes, FlexibleInstances #-}
-{-# OPTIONS_GHC -Wall -Wno-name-shadowing -Wno-partial-type-signatures -O0 #-}
+{-# LANGUAGE PartialTypeSignatures, ScopedTypeVariables, FlexibleContexts, GADTs, TypeApplications, DataKinds, NoStarIsType,TypeOperators, DeriveAnyClass, DeriveGeneric, MultiParamTypeClasses, TypeSynonymInstances, AllowAmbiguousTypes, FlexibleInstances, BangPatterns, ViewPatterns #-}
+{-# OPTIONS_GHC -Wall -Wno-name-shadowing -Wno-partial-type-signatures -O0 -freduction-depth=0 #-}
 module Synquid.Train where
 
 import Synquid.Logic
@@ -12,6 +12,8 @@ import qualified Data.Map as Map
 import Data.Map (Map)
 import qualified Data.Foldable as F
 import Control.Monad.Logic
+import Data.List
+import Data.Function
 
 import qualified Torch.NN as U
 import Torch.Typed hiding (DType, Device, shape, sin, any, length, replicate, round)
@@ -25,11 +27,16 @@ import Data.Maybe
 import Data.List.Split
 import GHC.TypeLits
 import Data.Proxy
+import System.Random.Shuffle
 
 trainAndUpdateModel :: MonadIO s => BaseWeights -> ExampleDataset -> s BaseWeights
-trainAndUpdateModel model examples = liftIO $ do
-  if (not $ null examples)
+trainAndUpdateModel model examples' = liftIO $ do
+  if (not $ null examples')
   then do
+    let groups = groupBy ((==) `on` (fst . fst)) $ examples'
+    let n = Prelude.floor $ 0.1*(fromIntegral $ length groups)
+    (concat -> testdata,concat -> examples) <- splitAt n <$> shuffleM groups
+    print ("DATA",length testdata, length examples)
     let
         maxLearningRate = 1e-2
         finalLearningRate = 1e-4
@@ -56,19 +63,31 @@ trainAndUpdateModel model examples = liftIO $ do
         step (model,optim,epoch) = do
           let learningRate = learningRateSchedule epoch
               _ = optim `asTypeOf` optimInit
+          print ("Epoch",epoch)
           (model',optim') <- train model optim learningRate examples
           pure (model', optim', epoch+1)
 
     (model',_optim',_epochs') <- loop numEpochs step init
-    let res = map (runModel @1 model' . (:. HNil) . fst) examples
-        yact = map (encodeBool' . snd) examples
-        re = zipWith (\x y -> (round (toFloat $ reshape x),round (toFloat $ reshape y))) res yact
+    let res = map (toFloat . reshape . runModel @1 model' . (:. HNil) . fst) testdata
+        yact = map (toFloat . reshape . encodeBool' . snd) testdata
+        re = zipWith (\x y -> (round x,round y)) res yact
         count = length $ filter (uncurry (==)) re
     print (count,length yact)
+    print ("Eval",eval testdata res)
     print re
     saveParams "synquid-model" model'
     pure model'
   else pure model
+
+eval :: [Example] -> [Float] -> (Int,Int,Int)
+eval xs ys = foldl' (\(!a,!b,!x) (!c,!d,!y) -> (a+c,b+d,x+y)) (0,0,0) $ map go groups
+  where
+    groups = groupBy ((==) `on` (fst . fst . fst)) $ zip xs ys
+    go xs = case find (snd . fst) xs of
+      Just (_,val)
+        | val >= maximum (map snd xs) -> (1,1,0)
+        | otherwise -> (0,1,0)
+      Nothing -> (0,0,1)
 
 loop :: Monad m => Int -> (a -> m a) -> a -> m a
 loop n f = foldr (<=<) pure (replicate n f)
@@ -90,10 +109,12 @@ instance Apply MkChunk [a] (HJust (a,[a])) where
 chunked :: forall batch a. (KnownNat batch, _) => [a] -> ([HList (HReplicateR batch a)],[a])
 chunked xs = go chunks
   where
-    chunks = chunksOf (fromInteger $ natVal $ Proxy @batch) xs
+    size = fromInteger $ natVal $ Proxy @batch
+    chunks = chunksOf size xs
     go [] = ([],[])
-    go [xs] = ([],xs)
-    go (xs:xss) = ((hunfoldr MkChunk xs :: HList (HReplicateR batch a)) : xss', slop)
+    go (xs:xss)
+      | length xs < size = (xss',xs ++ slop)
+      | otherwise = ((hunfoldr MkChunk xs :: HList (HReplicateR batch a)) : xss', slop)
       where (xss', slop) = go xss
 
 -- | Train the model for one epoch
@@ -119,8 +140,9 @@ train model optim learningRate examples = do
         print ("StepOne Loss",loss,y',yact)
         runStep model optim loss learningRate
 
+      step :: forall n. (KnownNat n , _) => _
       step ex (model,optim) = do
-        let y' = runModel @32 model xs
+        let y' = runModel @n model xs
             yact = stack @0 $ hmap' (EncodeBool model) yact'
             (xs,yact') = hunzip ex
             loss = useless + binaryCrossEntropy @'ReduceMean ones y' yact
@@ -128,10 +150,12 @@ train model optim learningRate examples = do
         print ("Loss",loss,y',yact)
         runStep model optim loss learningRate
 
-      (chunks,slop) = chunked @32 examples
+      (chunks,slop) = chunked @256 examples
   -- training is a fold over the 'examples' stream
-  (model', optim') <- F.foldrM step (model,optim) chunks
-  F.foldrM stepOne (model',optim') slop
+  (model', optim') <- F.foldrM (step @256) (model,optim) chunks
+  let (chunks',slop') = chunked @32 slop
+  (model'',optim'') <- F.foldrM (step @32) (model',optim') chunks'
+  F.foldrM stepOne (model'',optim'') slop'
 
 type ExampleDataset = [Example]
 type Example = ((RType,RSchema),Bool)
