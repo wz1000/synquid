@@ -1,5 +1,5 @@
 -- | Refinement type reconstruction for programs with holes
-{-# LANGUAGE PartialTypeSignatures, ScopedTypeVariables, FlexibleContexts, GADTs, TypeApplications, DataKinds, NoStarIsType,TypeOperators, DeriveAnyClass, DeriveGeneric, MultiParamTypeClasses, TypeSynonymInstances #-}
+{-# LANGUAGE PartialTypeSignatures, ScopedTypeVariables, FlexibleContexts, GADTs, TypeApplications, DataKinds, NoStarIsType,TypeOperators, DeriveAnyClass, DeriveGeneric, MultiParamTypeClasses, TypeSynonymInstances, AllowAmbiguousTypes, FlexibleInstances #-}
 {-# OPTIONS_GHC -Wall -Wno-name-shadowing -Wno-partial-type-signatures -O0 #-}
 module Synquid.Train where
 
@@ -22,6 +22,9 @@ import System.Directory
 import Text.Read
 import System.IO
 import Data.Maybe
+import Data.List.Split
+import GHC.TypeLits
+import Data.Proxy
 
 trainAndUpdateModel :: MonadIO s => BaseWeights -> ExampleDataset -> s BaseWeights
 trainAndUpdateModel model examples = liftIO $ do
@@ -57,13 +60,13 @@ trainAndUpdateModel model examples = liftIO $ do
           pure (model', optim', epoch+1)
 
     (model',_optim',_epochs') <- loop numEpochs step init
-    let res = map (runModel model' . fst) examples
+    let res = map (runModel @1 model' . (:. HNil) . fst) examples
         yact = map (encodeBool' . snd) examples
         re = zipWith (\x y -> (round (toFloat $ reshape x),round (toFloat $ reshape y))) res yact
         count = length $ filter (uncurry (==)) re
     print (count,length yact)
     print re
-    saveParams "synquid-model.pt" model'
+    saveParams "synquid-model" model'
     pure model'
   else pure model
 
@@ -73,6 +76,25 @@ loop n f = foldr (<=<) pure (replicate n f)
 data Untype = Untype
 instance Apply' Untype (Parameter device dtype shape) (U.Parameter) where
   apply' _ = untypeParam
+
+data EncodeBool = EncodeBool BaseWeights
+instance Apply' EncodeBool Bool (Tensor Dev DT '[]) where
+  apply' (EncodeBool bw) b = reshape $ encodeBool' b
+
+data MkChunk = MkChunk
+instance Apply MkChunk [a] HNothing where
+  apply _ [] = HNothing
+instance Apply MkChunk [a] (HJust (a,[a])) where
+  apply _ (x:xs) = HJust (x,xs)
+
+chunked :: forall batch a. (KnownNat batch, _) => [a] -> ([HList (HReplicateR batch a)],[a])
+chunked xs = go chunks
+  where
+    chunks = chunksOf (fromInteger $ natVal $ Proxy @batch) xs
+    go [] = ([],[])
+    go [xs] = ([],xs)
+    go (xs:xss) = ((hunfoldr MkChunk xs :: HList (HReplicateR batch a)) : xss', slop)
+      where (xss', slop) = go xss
 
 -- | Train the model for one epoch
 train ::
@@ -87,17 +109,29 @@ train ::
   [((RType,RSchema), Bool)] ->
   -- | final model and optimizer
   IO (BaseWeights, optim)
-train model optim learningRate examples =
+train model optim learningRate examples = do
   let -- training step function
-      step (x,yact') (model,optim) = do
-        let y' = runModel model x
+      stepOne (x,yact') (model,optim) = do
+        let y' = runModel @1 model (x :. HNil)
             yact = encodeBool' yact'
+            loss = useless + binaryCrossEntropy @'ReduceMean ones y' yact
+            useless = mulScalar (0:: Float) ( UnsafeMkTensor $ sum $ map U.sumAll $ map U.toDependent $ toList . Just . hmap' Untype . flattenParameters $ model)
+        print ("StepOne Loss",loss,y',yact)
+        runStep model optim loss learningRate
+
+      step ex (model,optim) = do
+        let y' = runModel @32 model xs
+            yact = stack @0 $ hmap' (EncodeBool model) yact'
+            (xs,yact') = hunzip ex
             loss = useless + binaryCrossEntropy @'ReduceMean ones y' yact
             useless = mulScalar (0:: Float) ( UnsafeMkTensor $ sum $ map U.sumAll $ map U.toDependent $ toList . Just . hmap' Untype . flattenParameters $ model)
         print ("Loss",loss,y',yact)
         runStep model optim loss learningRate
-   in -- training is a fold over the 'examples' stream
-      F.foldrM step (model,optim) $ examples
+
+      (chunks,slop) = chunked @32 examples
+  -- training is a fold over the 'examples' stream
+  (model', optim') <- F.foldrM step (model,optim) chunks
+  F.foldrM stepOne (model',optim') slop
 
 type ExampleDataset = [Example]
 type Example = ((RType,RSchema),Bool)

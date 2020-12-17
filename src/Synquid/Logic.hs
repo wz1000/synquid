@@ -1,4 +1,5 @@
-{-# LANGUAGE TemplateHaskell, TypeApplications, TypeOperators, Rank2Types, DataKinds, TypeSynonymInstances, FlexibleInstances, NoStarIsType, NamedFieldPuns, DeriveGeneric, DeriveAnyClass, MultiParamTypeClasses, ScopedTypeVariables, PatternSynonyms #-}
+{-# LANGUAGE TemplateHaskell, TypeApplications, TypeOperators, Rank2Types, DataKinds, TypeSynonymInstances, FlexibleInstances, NoStarIsType, NamedFieldPuns, DeriveGeneric, DeriveAnyClass, MultiParamTypeClasses, ScopedTypeVariables, PatternSynonyms, AllowAmbiguousTypes, GADTs, UndecidableInstances, FlexibleContexts, PartialTypeSignatures #-}
+
 
 -- | Formulas of the refinement logic
 module Synquid.Logic where
@@ -83,10 +84,14 @@ type Layer inp out = Linear inp out DT Dev
 type Production n = Layer (n*Size) Size
 type Terminal = Production 1
 
-runModel :: (Encode a, Encode b) => BaseWeights -> (a,b) -> Tensor Dev DT '[1]
-runModel bw (target,cand) = runModelTop bw $ cat @0 (encode () bw target :. encode () bw cand :. HNil)
+data ProcessExamples = ProcessExamples BaseWeights
+instance (Encode a, Encode b, size ~ (2*Size),c ~ (Tensor Dev DT '[size])) => Apply' ProcessExamples (a,b) c where
+    apply' (ProcessExamples bw) (a,b) = cat @0 (encode () bw a :. encode () bw b :. HNil)
 
-runModelTop :: BaseWeights -> Tensor Dev DT '[2*Size] -> Tensor Dev DT '[1]
+runModel :: forall batch a b. (Encode a, Encode b, KnownNat batch, _) => BaseWeights -> HList (HReplicateR batch (a,b)) -> Tensor Dev DT '[batch]
+runModel bw examples = reshape $ runModelTop @batch bw $ stack @0 @_ @_ @_ @(HReplicateR batch (Tensor Dev DT '[2*Size])) $ hmap' (ProcessExamples bw) examples
+
+runModelTop :: forall batch. BaseWeights -> Tensor Dev DT '[batch,2*Size] -> Tensor Dev DT '[batch,1]
 runModelTop BaseWeights{layer2,layer1,layer0}
   = sigmoid
   . forward layer2
