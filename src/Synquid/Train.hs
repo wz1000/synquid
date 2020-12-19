@@ -1,6 +1,6 @@
 -- | Refinement type reconstruction for programs with holes
-{-# LANGUAGE PartialTypeSignatures, ScopedTypeVariables, FlexibleContexts, GADTs, TypeApplications, DataKinds, NoStarIsType,TypeOperators, DeriveAnyClass, DeriveGeneric, MultiParamTypeClasses, TypeSynonymInstances, AllowAmbiguousTypes, FlexibleInstances, BangPatterns, ViewPatterns #-}
-{-# OPTIONS_GHC -Wall -Wno-name-shadowing -Wno-partial-type-signatures -O0 -freduction-depth=0 #-}
+{-# LANGUAGE PartialTypeSignatures, ScopedTypeVariables, FlexibleContexts, GADTs, TypeApplications, DataKinds, NoStarIsType,TypeOperators, DeriveAnyClass, DeriveGeneric, MultiParamTypeClasses, TypeSynonymInstances, AllowAmbiguousTypes, FlexibleInstances, BangPatterns, ViewPatterns, StandaloneDeriving #-}
+{-# OPTIONS_GHC -Wall -Wno-name-shadowing -O0 -freduction-depth=0 #-}
 module Synquid.Train where
 
 import Synquid.Logic
@@ -9,14 +9,13 @@ import Synquid.Program
 import Synquid.Explorer
 
 import qualified Data.Map as Map
-import Data.Map (Map)
 import qualified Data.Foldable as F
 import Control.Monad.Logic
 import Data.List
 import Data.Function
 
 import qualified Torch.NN as U
-import Torch.Typed hiding (DType, Device, shape, sin, any, length, replicate, round)
+import Torch.Typed hiding (DType, Device, shape, sin, any, length, replicate, round, div)
 import qualified Torch.Functional as U
 import qualified Torch.Autograd as U
 import GHC.Exts (IsList(toList))
@@ -28,6 +27,8 @@ import Data.List.Split
 import GHC.TypeLits
 import Data.Proxy
 import System.Random.Shuffle
+import Data.Vector.Sized (Vector)
+import qualified Data.Vector.Sized as V
 
 trainAndUpdateModel :: MonadIO s => BaseWeights -> ExampleDataset -> s BaseWeights
 trainAndUpdateModel model examples' = liftIO $ do
@@ -40,9 +41,9 @@ trainAndUpdateModel model examples' = liftIO $ do
     let
         maxLearningRate = 1e-2
         finalLearningRate = 1e-4
-        numEpochs = 100
-        numWarmupEpochs = 10
-        numCooldownEpochs = 10
+        numEpochs = 120
+        numWarmupEpochs = 20
+        numCooldownEpochs = 20
 
         -- single-cycle learning rate schedule, see for instance https://arxiv.org/abs/1803.09820
         learningRateSchedule epoch
@@ -68,7 +69,7 @@ trainAndUpdateModel model examples' = liftIO $ do
           pure (model', optim', epoch+1)
 
     (model',_optim',_epochs') <- loop numEpochs step init
-    let res = map (toFloat . reshape . runModel @1 model' . (:. HNil) . fst) testdata
+    let res = map (toFloat . reshape . runModel @1 model' . V.singleton . fst) testdata
         yact = map (toFloat . reshape . encodeBool' . snd) testdata
         re = zipWith (\x y -> (round x,round y)) res yact
         count = length $ filter (uncurry (==)) re
@@ -93,32 +94,36 @@ loop :: Monad m => Int -> (a -> m a) -> a -> m a
 loop n f = foldr (<=<) pure (replicate n f)
 
 data Untype = Untype
-instance Apply' Untype (Parameter device dtype shape) (U.Parameter) where
+instance Apply' Untype (Parameter Dev dtype shape) (U.Parameter) where
   apply' _ = untypeParam
 
-data EncodeBool = EncodeBool BaseWeights
-instance Apply' EncodeBool Bool (Tensor Dev DT '[]) where
-  apply' (EncodeBool bw) b = reshape $ encodeBool' b
-
-data MkChunk = MkChunk
-instance Apply MkChunk [a] HNothing where
-  apply _ [] = HNothing
-instance Apply MkChunk [a] (HJust (a,[a])) where
-  apply _ (x:xs) = HJust (x,xs)
-
-chunked :: forall batch a. (KnownNat batch, _) => [a] -> ([HList (HReplicateR batch a)],[a])
+chunked :: forall batch a. KnownNat batch => [a] -> ([Vector batch a],[a])
 chunked xs = go chunks
   where
-    size = fromInteger $ natVal $ Proxy @batch
+    size = natValI @batch
     chunks = chunksOf size xs
     go [] = ([],[])
     go (xs:xss)
-      | length xs < size = (xss',xs ++ slop)
-      | otherwise = ((hunfoldr MkChunk xs :: HList (HReplicateR batch a)) : xss', slop)
+      | Just ys <- V.fromListN xs = (ys : xss', slop)
+      | otherwise = (xss', xs ++ slop)
       where (xss', slop) = go xss
+
+data ChunkedVector a where
+  ChunkedVector :: KnownNat n => Vector n a -> ChunkedVector a
+
+deriving instance Show a => Show (ChunkedVector a)
+
+chunkedStream :: forall start a. KnownNat start => [a] -> [ChunkedVector a]
+chunkedStream xs = map ChunkedVector this ++ next
+  where (this,slop) = chunked @start xs
+        size = fromIntegral $ natValI @start
+        next | null slop = []
+             | otherwise = case someNatVal (size `div` 2) of
+                Just (SomeNat (p :: Proxy next)) -> chunkedStream @next slop
 
 -- | Train the model for one epoch
 train ::
+  forall optim tensors.
   _ =>
   -- | initial model datatype holding the weights
   BaseWeights ->
@@ -127,35 +132,24 @@ train ::
   -- | learning rate, 'LearningRate device dtype' is a type alias for 'Tensor device dtype '[]'
   LearningRate Dev DT ->
   -- | stream of training examples consisting of inputs and outputs
-  [((RType,RSchema), Bool)] ->
+  [Example] ->
   -- | final model and optimizer
   IO (BaseWeights, optim)
 train model optim learningRate examples = do
   let -- training step function
-      stepOne (x,yact') (model,optim) = do
-        let y' = runModel @1 model (x :. HNil)
-            yact = encodeBool' yact'
+      step :: ChunkedVector Example -> (BaseWeights,optim) -> IO (BaseWeights, optim)
+      step (ChunkedVector ex) (model,optim) = do
+        let y' = runModel model xs
+            yact = vecStack @0 $ fmap (reshape . encodeBool') yact'
+            (xs,yact') = V.unzip ex
             loss = useless + binaryCrossEntropy @'ReduceMean ones y' yact
             useless = mulScalar (0:: Float) ( UnsafeMkTensor $ sum $ map U.sumAll $ map U.toDependent $ toList . Just . hmap' Untype . flattenParameters $ model)
-        print ("StepOne Loss",loss,y',yact)
+        print ("Loss",loss,length ex)
         runStep model optim loss learningRate
 
-      step :: forall n. (KnownNat n , _) => _
-      step ex (model,optim) = do
-        let y' = runModel @n model xs
-            yact = stack @0 $ hmap' (EncodeBool model) yact'
-            (xs,yact') = hunzip ex
-            loss = useless + binaryCrossEntropy @'ReduceMean ones y' yact
-            useless = mulScalar (0:: Float) ( UnsafeMkTensor $ sum $ map U.sumAll $ map U.toDependent $ toList . Just . hmap' Untype . flattenParameters $ model)
-        print ("Loss",loss,y',yact)
-        runStep model optim loss learningRate
-
-      (chunks,slop) = chunked @256 examples
+      chunks = chunkedStream @4096 examples
   -- training is a fold over the 'examples' stream
-  (model', optim') <- F.foldrM (step @256) (model,optim) chunks
-  let (chunks',slop') = chunked @32 slop
-  (model'',optim'') <- F.foldrM (step @32) (model',optim') chunks'
-  F.foldrM stepOne (model'',optim'') slop'
+  F.foldrM step (model,optim) chunks
 
 type ExampleDataset = [Example]
 type Example = ((RType,RSchema),Bool)

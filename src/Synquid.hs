@@ -37,6 +37,7 @@ import qualified Text.PrettyPrint.ANSI.Leijen as PP
 import Text.PrettyPrint.ANSI.Leijen (fill, column)
 
 import Data.List.Split
+import qualified Data.Vector.Sized as V
 
 programName = "synquid"
 versionName = "0.4"
@@ -86,7 +87,7 @@ main = do
                     void $ trainAndUpdateModel params dat
                   else if test then do
                     dat <- readData file
-                    let res = map (toFloat . reshape . runModel @1 params . (:. HNil) . fst) dat
+                    let res = map (toFloat . reshape . runModel @1 params . V.singleton . fst) dat
                     print ("eval",eval dat res)
                   else runOnFile synquidParams explorerParams solverParams file libs
 

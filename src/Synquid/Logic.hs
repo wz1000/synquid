@@ -35,10 +35,11 @@ import Data.Proxy
 import Data.Kind
 import System.Directory
 import GHC.Stack (HasCallStack)
+import Data.Vector.Sized (Vector)
 
 type Env = ()
 type Size = 10
-type Dev = '(CPU,0)
+type Dev = '(CUDA,0)
 type DT = 'Float
 type Encoding = Tensor Dev DT '[Size]
 
@@ -82,14 +83,10 @@ instance Encode Encoding where
 type Layer inp out = Linear inp out DT Dev
 
 type Production n = Layer (n*Size) Size
-type Terminal = Production 1
+type Terminal = Production 0
 
-data ProcessExamples = ProcessExamples BaseWeights
-instance (Encode a, Encode b, size ~ (2*Size),c ~ (Tensor Dev DT '[size])) => Apply' ProcessExamples (a,b) c where
-    apply' (ProcessExamples bw) (a,b) = cat @0 (encode () bw a :. encode () bw b :. HNil)
-
-runModel :: forall batch a b. (Encode a, Encode b, KnownNat batch, _) => BaseWeights -> HList (HReplicateR batch (a,b)) -> Tensor Dev DT '[batch]
-runModel bw examples = reshape $ runModelTop @batch bw $ stack @0 @_ @_ @_ @(HReplicateR batch (Tensor Dev DT '[2*Size])) $ hmap' (ProcessExamples bw) examples
+runModel :: forall batch a b. (Encode a, Encode b, KnownNat batch) => BaseWeights -> Vector batch (a,b) -> Tensor Dev DT '[batch]
+runModel bw examples = reshape $ runModelTop @batch bw $ vecStack @0 $ fmap (\(a,b) -> cat @0 (encode () bw a :. encode () bw b :. HNil)) examples
 
 runModelTop :: forall batch. BaseWeights -> Tensor Dev DT '[batch,2*Size] -> Tensor Dev DT '[batch,1]
 runModelTop BaseWeights{layer2,layer1,layer0}
@@ -110,6 +107,9 @@ data BaseWeights = BaseWeights
   , w_lcons :: Production 2
   , w_Nil :: Terminal
   , w_pair :: Production 2
+  , w_sym :: Production 1
+  , w_false :: Terminal
+  , w_true :: Terminal
 
 -- SchemaSkeleton
   , w_monotype :: Production 1
@@ -178,7 +178,7 @@ data BaseWeights = BaseWeights
   } deriving (Show, Generic, Parameterized)
 
 embedHelper :: Terminal -> Encoding
-embedHelper t = forward t (ones :: Encoding)
+embedHelper = toDependent . linearBias
 
 encodeUnit :: BaseWeights -> Encoding
 encodeUnit = embedHelper . w_Unit
@@ -274,6 +274,9 @@ instance Randomizable () BaseWeights where
      <*> sample TensorSpec
      <*> sample LinearSpec
      <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
+     <*> sample TensorSpec
      <*> sample LinearSpec
      <*> sample LinearSpec
      <*> sample LinearSpec
@@ -348,14 +351,14 @@ encodePair :: BaseWeights -> Encoding -> Encoding -> Encoding
 encodePair = dyadic w_pair
 
 encodeId :: Env -> BaseWeights -> Id -> Encoding
-encodeId _ bw id = tanh . forward (w_intl bw) $ encodeInt bw (hash id)
+encodeId _ bw id = tanh . forward (w_sym bw) $ encodeInt bw (hash id)
 
 encodeInt :: BaseWeights -> Int -> Encoding
-encodeInt _ i = UnsafeMkTensor $ U.asTensor $ fromIntegral i : replicate 9 (0.0 :: Float)
+encodeInt _ i = mulScalar (fromIntegral i :: Float) ones
 
 encodeBool :: BaseWeights -> Bool -> Encoding
-encodeBool _ True  = UnsafeMkTensor $ U.asTensor $ 1.0 : replicate 9 (0.0 :: Float)
-encodeBool _ False = UnsafeMkTensor $ U.asTensor $ 0.0 : 1.0 : replicate 8 (0.0 :: Float)
+encodeBool bw True  = embedHelper (w_false bw)
+encodeBool bw False = embedHelper (w_true bw)
 
 encodeBool' :: Bool -> Tensor Dev DT '[1]
 encodeBool' True  = full (1 :: Float)
