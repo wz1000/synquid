@@ -21,7 +21,6 @@ import Data.Maybe
 import System.Random.Shuffle
 import System.Time.Extra
 import qualified Data.Vector.Sized as V
-import System.Mem
 
 trainAndUpdateModel :: MonadIO s => BaseWeights -> ExampleDataset -> s BaseWeights
 trainAndUpdateModel model examples' = liftIO $ do
@@ -35,7 +34,7 @@ trainAndUpdateModel model examples' = liftIO $ do
         maxLearningRate = 1e-2
         finalLearningRate = 1e-4
         numEpochs = 120
-        numWarmupEpochs = 10
+        numWarmupEpochs = 20
         numCooldownEpochs = 20
 
         -- single-cycle learning rate schedule, see for instance https://arxiv.org/abs/1803.09820
@@ -58,7 +57,6 @@ trainAndUpdateModel model examples' = liftIO $ do
           let learningRate = learningRateSchedule epoch
               _ = optim `asTypeOf` optimInit
           print ("Epoch",epoch)
-          performGC
           start <- offsetTime
           (model',optim') <- train model optim learningRate examples
           duration <- start
@@ -77,15 +75,17 @@ trainAndUpdateModel model examples' = liftIO $ do
     pure model
   else pure model
 
-eval :: [Example] -> [Float] -> (Int,Int,Int)
-eval xs ys = foldl' (\(!a,!b,!x) (!c,!d,!y) -> (a+c,b+d,x+y)) (0,0,0) $ map go groups
+eval :: [Example] -> [Float] -> (Int,Int,[(Int,Int)])
+eval xs ys = foldl' (\(!a,!b,!x) (!c,!d,!y) -> (a+c,b+d,maybe x (:x) y)) (0,0,[]) $ map go groups
   where
     groups = groupBy ((==) `on` (fst . fst . fst)) $ zip xs ys
+    go :: [(Example, Float)] -> (Int,Int,Maybe (Int,Int))
     go xs = case find (snd . fst) xs of
       Just (_,val)
-        | val >= maximum (map snd xs) -> (1,1,0)
-        | otherwise -> (0,1,0)
-      Nothing -> (0,0,1)
+        | val >= head vals -> (1,1,Nothing)
+        | otherwise -> let Just idx = elemIndex val vals in (0,1,Just (idx,length vals))
+      Nothing -> (0,0,Nothing)
+      where vals = reverse $ sort $ map snd xs
 
 loop :: Monad m => Int -> (a -> m a) -> a -> m a
 loop n f = foldr (<=<) pure (replicate n f)

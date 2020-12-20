@@ -13,10 +13,24 @@ import Data.Vector.Sized (Vector)
 import qualified Data.Vector.Sized as V
 import qualified Data.Vector as UV
 import GHC.TypeLits
+import System.Mem
+import Control.Parallel.Strategies
+import Data.List.Split
+import Control.DeepSeq
+import Data.List
 
 data SumAll = SumAll
-instance Apply' SumAll ((Parameter Dev DT shape),(Tensor Dev DT '[])) (Tensor Dev DT '[]) where
-  apply' _ (this,acc) = acc + (sumAll $ toDependent this)
+instance Apply' SumAll ((Tensor Dev DT shape),(Tensor Dev DT '[])) (Tensor Dev DT '[]) where
+  apply' _ (this,acc) = acc + (sumAll this)
+
+newtype Scale = Scale Float
+instance Apply' Scale (Tensor Dev DT shape) (Tensor Dev DT shape) where
+  apply' (Scale x) xs = mulScalar x xs
+
+instance NFData (HList '[]) where
+  rnf x = x `seq` ()
+instance (NFData x, NFData (HList xs)) => NFData (HList (x:xs)) where
+  rnf (x :. xs) = rnf x `seq` rnf xs
 
 -- | Train the model for one epoch
 train ::
@@ -32,12 +46,39 @@ train ::
   [((a,b),Bool)] ->
   -- | final BaseWeights and optimizer
   IO (BaseWeights, optim)
-train model optim learningRate (UV.fromList -> V.SomeSized examples) = do
-  let y' = runModel model xs
-      yact = vecStack @0 $ fmap (reshape . encodeBool') yact'
-      (xs,yact') = V.unzip examples
-      loss = useless + binaryCrossEntropy @'ReduceMean ones y' yact
-      useless = mulScalar (0:: Float) (hfoldr SumAll (zeros :: Tensor Dev DT '[]) . flattenParameters $ model)
-  print ("Loss",loss,length examples)
-  runStep model optim loss learningRate
+train model optim learningRate examples = do
+  performGC
+  let getLoss (V.SomeSized exs) = loss
+        where
+          (xs,yact') = V.unzip exs
+          y' = runModel model xs
+          yact = vecStack @0 $ fmap (reshape . encodeBool') yact'
+          loss = useless + binaryCrossEntropy @'ReduceMean ones y' yact
+
+      numThreads = 3
+      len = length examples `div` numThreads
+      chunks' = map UV.fromList $ chunksOf len examples
+      chunks
+        | (x : xs@(_:_)) <- chunks'
+        , let l = last xs
+        , UV.length l < len
+        = (x <> l) : init xs
+        | otherwise = chunks'
+
+      losses = map getLoss chunks
+
+      grads = parMap rseq (`grad` parameters) losses
+
+      useless = mulScalar (0:: Float) (hfoldr SumAll (zeros :: Tensor Dev DT '[]) tensors)
+
+      parameters = flattenParameters model
+      gradients = hmap' (Scale (1/(fromIntegral numThreads)))$ foldl1' (hzipWith SumF) grads
+      tensors = hmap' ToDependent parameters
+
+      (tensors', optim') = step learningRate gradients tensors optim
+
+  print ("Loss",losses,map UV.length chunks)
+  parameters' <- hmapM' MakeIndependent tensors'
+  let model' = replaceParameters model parameters'
+  pure (model', optim')
 

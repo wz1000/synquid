@@ -76,6 +76,7 @@ executable synquid
                     , vector-strategies
                     , deepseq
                     , extra
+                    , parallel
 
   ghc-options: -O1 -threaded
 

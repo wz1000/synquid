@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, TypeApplications, TypeOperators, Rank2Types, DataKinds, TypeSynonymInstances, FlexibleInstances, NoStarIsType, NamedFieldPuns, DeriveGeneric, DeriveAnyClass, MultiParamTypeClasses, ScopedTypeVariables, PatternSynonyms, AllowAmbiguousTypes, GADTs, UndecidableInstances, FlexibleContexts, PartialTypeSignatures #-}
+{-# LANGUAGE TemplateHaskell, TypeApplications, TypeOperators, Rank2Types, DataKinds, TypeSynonymInstances, FlexibleInstances, NoStarIsType, NamedFieldPuns, DeriveGeneric, DeriveAnyClass, MultiParamTypeClasses, ScopedTypeVariables, PatternSynonyms, AllowAmbiguousTypes, GADTs, UndecidableInstances, FlexibleContexts, PartialTypeSignatures, KindSignatures #-}
 
 
 -- | Formulas of the refinement logic
@@ -38,6 +38,7 @@ import GHC.Stack (HasCallStack)
 import Data.Vector.Sized (Vector, withVectorUnsafe)
 import Data.Vector.Strategies
 import Control.DeepSeq
+import System.Mem
 
 instance NFData (Tensor device dtype shape) where
   rnf = rnf . numel
@@ -85,14 +86,30 @@ instance Encode Encoding where
 
 type Layer inp out = Linear inp out DT Dev
 
+type Hidden (n :: Nat) = (n*Size) -- If (n <=? 1) Size ((3*n*Size) `Div` 2)
+
 -- Takes n inputs to 1 output (each of size Size)
-type Production n = Layer (n*Size) Size
-type Terminal = Production 0
+data Production (n :: Nat)
+  = Production
+  { top :: Layer (Hidden n) Size
+  , bot :: Layer (n*Size) (Hidden n)
+  } deriving (Show, Generic, Parameterized)
+
+instance (inp ~ (n*Size)) => HasForward (Production n) (Tensor Dev DT '[inp]) (Tensor Dev DT '[Size]) where
+  forward Production{top, bot} = tanh . forward top
+  forwardStoch m x = pure $ forward m x
+
+data ProductionSpec (n :: Nat) = ProductionSpec
+
+instance (KnownNat (n*Size), KnownNat (Hidden n)) => Randomizable (ProductionSpec n) (Production n) where
+  sample _ = Production <$> sample LinearSpec <*> sample LinearSpec
+
+type Terminal = Parameter Dev DT '[Size]
 
 runModel :: forall batch a b. (Encode a, Encode b, KnownNat batch) => BaseWeights -> Vector batch (a,b) -> Tensor Dev DT '[batch]
 runModel bw examples = reshape $ runModelTop @batch bw $ vecStack @0 $ (withVectorUnsafe $ (`using` (parVector chunkSize)) . fmap (\(a,b) -> cat @0 (encode () bw a :. encode () bw b :. HNil))) examples
   where
-    chunkSize = natValI @batch `div` 10
+    chunkSize = natValI @batch `div` 4
 
 runModelTop :: forall batch. BaseWeights -> Tensor Dev DT '[batch,2*Size] -> Tensor Dev DT '[batch,1]
 runModelTop BaseWeights{layer2,layer1,layer0}
@@ -184,7 +201,7 @@ data BaseWeights = BaseWeights
   } deriving (Show, Generic, Parameterized)
 
 embedHelper :: Terminal -> Encoding
-embedHelper = toDependent . linearBias
+embedHelper = toDependent
 
 encodeUnit :: BaseWeights -> Encoding
 encodeUnit = embedHelper . w_Unit
@@ -270,84 +287,81 @@ encodeMember = embedHelper . w_Member
 encodeSubset :: BaseWeights -> Encoding
 encodeSubset = embedHelper . w_Subset
 
-pattern TensorSpec = LinearSpec
+data ParamSpec = ParamSpec
+instance Randomizable ParamSpec (Parameter Dev DT '[Size]) where
+  sample _ = makeIndependent =<< randn
+
 instance Randomizable () BaseWeights where
     sample ()
       = BaseWeights
      <$> sample LinearSpec
      <*> sample LinearSpec
      <*> sample LinearSpec
-     <*> sample TensorSpec
-     <*> sample LinearSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample TensorSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample TensorSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample LinearSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
-     <*> sample TensorSpec
+     <*> sample ParamSpec
+     <*> sample ProductionSpec
+     <*> sample ParamSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ParamSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ParamSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ProductionSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
+     <*> sample ParamSpec
 
 monadic :: (a -> Production 1) -> a -> Encoding -> Encoding
-monadic k bw a = tanh . forward (k bw) $ a
+monadic k bw a = forward (k bw) $ a
 
 dyadic :: HasCallStack => (a -> Production 2) -> a -> Encoding -> Encoding -> Encoding
-dyadic k bw a b
-  | U.requiresGrad (toDynamic a) == U.requiresGrad (toDynamic b) = tanh . forward (k bw) $ cat @0 (a :. b :. HNil)
-  | otherwise = error "dyadic"
+dyadic k bw a b = forward (k bw) $ cat @0 (a :. b :. HNil)
 
 triadic :: HasCallStack => (a -> Production 3) -> a -> Encoding -> Encoding -> Encoding -> Encoding
-triadic k bw a b c
-  | U.requiresGrad (toDynamic a) == U.requiresGrad (toDynamic b)
-  , U.requiresGrad (toDynamic b) == U.requiresGrad (toDynamic c)
-  = tanh . forward (k bw) $ cat @0 (a :. b :. c :. HNil)
-  | otherwise = error "triadic"
+triadic k bw a b c = forward (k bw) $ cat @0 (a :. b :. c :. HNil)
 
 -- Primitives
 encodeLCons :: BaseWeights -> Encoding -> Encoding -> Encoding
@@ -357,7 +371,7 @@ encodePair :: BaseWeights -> Encoding -> Encoding -> Encoding
 encodePair = dyadic w_pair
 
 encodeId :: Env -> BaseWeights -> Id -> Encoding
-encodeId _ bw id = tanh . forward (w_sym bw) $ encodeInt bw (hash id)
+encodeId _ bw id = forward (w_sym bw) $ encodeInt bw (hash id)
 
 encodeInt :: BaseWeights -> Int -> Encoding
 encodeInt _ i = mulScalar (fromIntegral i :: Float) ones
