@@ -20,7 +20,7 @@ import Control.Lens hiding (both)
 import Control.Monad
 
 import qualified Torch.Typed as T
-import Torch.Typed hiding (length, replicate)
+import Torch.Typed hiding (length, replicate, div)
 import GHC.TypeLits
 import Data.Hashable
 import qualified Torch.Tensor as U
@@ -35,11 +35,16 @@ import Data.Proxy
 import Data.Kind
 import System.Directory
 import GHC.Stack (HasCallStack)
-import Data.Vector.Sized (Vector)
+import Data.Vector.Sized (Vector, withVectorUnsafe)
+import Data.Vector.Strategies
+import Control.DeepSeq
+
+instance NFData (Tensor device dtype shape) where
+  rnf = rnf . numel
 
 type Env = ()
-type Size = 10
-type Dev = '(CUDA,0)
+type Size = 50
+type Dev = '(CPU,0)
 type DT = 'Float
 type Encoding = Tensor Dev DT '[Size]
 
@@ -78,15 +83,16 @@ instance (Encode a, Encode b) => Encode (a,b) where
 instance Encode Encoding where
   encode _ _ = id
 
--- Takes n inputs to 1 output (each of size Size)
-
 type Layer inp out = Linear inp out DT Dev
 
+-- Takes n inputs to 1 output (each of size Size)
 type Production n = Layer (n*Size) Size
 type Terminal = Production 0
 
 runModel :: forall batch a b. (Encode a, Encode b, KnownNat batch) => BaseWeights -> Vector batch (a,b) -> Tensor Dev DT '[batch]
-runModel bw examples = reshape $ runModelTop @batch bw $ vecStack @0 $ fmap (\(a,b) -> cat @0 (encode () bw a :. encode () bw b :. HNil)) examples
+runModel bw examples = reshape $ runModelTop @batch bw $ vecStack @0 $ (withVectorUnsafe $ (`using` (parVector chunkSize)) . fmap (\(a,b) -> cat @0 (encode () bw a :. encode () bw b :. HNil))) examples
+  where
+    chunkSize = natValI @batch `div` 10
 
 runModelTop :: forall batch. BaseWeights -> Tensor Dev DT '[batch,2*Size] -> Tensor Dev DT '[batch,1]
 runModelTop BaseWeights{layer2,layer1,layer0}

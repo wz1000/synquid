@@ -15,7 +15,7 @@ import Synquid.TypeConstraintSolver
 import Synquid.Explorer
 import Synquid.Synthesizer
 import Synquid.HtmlOutput
-import Synquid.Train (readData, trainAndUpdateModel, eval)
+import Synquid.Learn (readData, trainAndUpdateModel, eval)
 
 import qualified Torch.Typed as T
 import Torch.Typed hiding (length, replicate, mode)

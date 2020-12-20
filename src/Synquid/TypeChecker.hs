@@ -27,7 +27,7 @@ import qualified Text.PrettyPrint.ANSI.Leijen as L
 import Debug.Trace
 import GHC.TypeLits (type (*))
 import GHC.Generics (Generic)
-import Synquid.Train
+import Synquid.Learn
 
 -- | 'reconstruct' @eParams tParams goal@ : reconstruct missing types and terms in the body of @goal@ so that it represents a valid type judgment;
 -- return a type error if that is impossible
