@@ -22,14 +22,23 @@ import System.Random.Shuffle
 import System.Time.Extra
 import qualified Data.Vector.Sized as V
 
+upsample :: [(a,Bool)] -> [(a,Bool)]
+upsample xs = case find snd xs of
+  Just x -> replicate l x ++ xs
+  where
+    l = length xs - 2
+
 trainAndUpdateModel :: MonadIO s => BaseWeights -> ExampleDataset -> s BaseWeights
 trainAndUpdateModel model examples' = liftIO $ do
   if (not $ null examples')
   then do
     let groups = groupBy ((==) `on` (fst . fst)) $ examples'
     let n = Prelude.floor $ 0.1*(fromIntegral $ length groups)
-    (concat -> testdata,concat -> examples) <- splitAt n <$> shuffleM groups
-    print ("DATA",length testdata, length examples)
+    (concat -> testdata,examples') <- splitAt n <$> shuffleM groups
+    writeData "traindataset" (concat examples')
+    writeData "testdataset" testdata
+    let examples = map (\xs -> (fst . fst . head $ xs, map (\((_,b),c) -> (b,c)) xs)) examples'
+    print ("DATA",length testdata, length $ concat examples')
     let
         maxLearningRate = 1e-2
         finalLearningRate = 1e-4

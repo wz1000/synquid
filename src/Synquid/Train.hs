@@ -23,6 +23,10 @@ data SumAll = SumAll
 instance Apply' SumAll ((Tensor Dev DT shape),(Tensor Dev DT '[])) (Tensor Dev DT '[]) where
   apply' _ (this,acc) = acc + (sumAll this)
 
+data Add = Add
+instance Apply' Add ((Tensor Dev DT shape),(Tensor Dev DT shape)) (Tensor Dev DT shape) where
+  apply' _ (a,b) = a + b
+
 newtype Scale = Scale Float
 instance Apply' Scale (Tensor Dev DT shape) (Tensor Dev DT shape) where
   apply' (Scale x) xs = mulScalar x xs
@@ -43,19 +47,24 @@ train ::
   -- | learning rate, 'LearningRate device dtype' is a type alias for 'Tensor device dtype '[]'
   LearningRate Dev DT ->
   -- | stream of training examples consisting of inputs and outputs
-  [((a,b),Bool)] ->
+  [(a,[(b,Bool)])] ->
   -- | final BaseWeights and optimizer
   IO (BaseWeights, optim)
-train model optim learningRate examples = do
+train model optim learningRate examples' = do
   performGC
   let getLoss (V.SomeSized exs) = loss
         where
           (xs,yact') = V.unzip exs
           y' = runModel model xs
           yact = vecStack @0 $ fmap (reshape . encodeBool') yact'
-          loss = useless + binaryCrossEntropy @'ReduceMean ones y' yact
+          loss = useless + binaryCrossEntropy @'ReduceMean (ones + mulScalar (4 :: Float) yact) y' yact
 
-      numThreads = 3
+      examples = do
+        (spec,cands) <- examples'
+        (cand,res) <- cands
+        pure ((encode () model spec, cand),res)
+
+      numThreads = 8
       len = length examples `div` numThreads
       chunks' = map UV.fromList $ chunksOf len examples
       chunks
@@ -65,14 +74,14 @@ train model optim learningRate examples = do
         = (x <> l) : init xs
         | otherwise = chunks'
 
-      losses = map getLoss chunks
+      losses = parMap rdeepseq getLoss chunks
 
       grads = parMap rseq (`grad` parameters) losses
 
       useless = mulScalar (0:: Float) (hfoldr SumAll (zeros :: Tensor Dev DT '[]) tensors)
 
       parameters = flattenParameters model
-      gradients = hmap' (Scale (1/(fromIntegral numThreads)))$ foldl1' (hzipWith SumF) grads
+      gradients = foldl1' (hzipWith Add) grads
       tensors = hmap' ToDependent parameters
 
       (tensors', optim') = step learningRate gradients tensors optim

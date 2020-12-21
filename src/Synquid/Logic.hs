@@ -44,7 +44,7 @@ instance NFData (Tensor device dtype shape) where
   rnf = rnf . numel
 
 type Env = ()
-type Size = 50
+type Size = 10
 type Dev = '(CPU,0)
 type DT = 'Float
 type Encoding = Tensor Dev DT '[Size]
@@ -86,7 +86,7 @@ instance Encode Encoding where
 
 type Layer inp out = Linear inp out DT Dev
 
-type Hidden (n :: Nat) = (n*Size) -- If (n <=? 1) Size ((3*n*Size) `Div` 2)
+type Hidden (n :: Nat) = (n*Size) -- If (n <=? 1) Size ((2*n*Size) `Div` 3)
 
 -- Takes n inputs to 1 output (each of size Size)
 data Production (n :: Nat)
@@ -96,7 +96,7 @@ data Production (n :: Nat)
   } deriving (Show, Generic, Parameterized)
 
 instance (inp ~ (n*Size)) => HasForward (Production n) (Tensor Dev DT '[inp]) (Tensor Dev DT '[Size]) where
-  forward Production{top, bot} = tanh . forward top
+  forward Production{top, bot} = tanh . forward top -- . relu . forward bot
   forwardStoch m x = pure $ forward m x
 
 data ProductionSpec (n :: Nat) = ProductionSpec
@@ -109,15 +109,15 @@ type Terminal = Parameter Dev DT '[Size]
 runModel :: forall batch a b. (Encode a, Encode b, KnownNat batch) => BaseWeights -> Vector batch (a,b) -> Tensor Dev DT '[batch]
 runModel bw examples = reshape $ runModelTop @batch bw $ vecStack @0 $ (withVectorUnsafe $ (`using` (parVector chunkSize)) . fmap (\(a,b) -> cat @0 (encode () bw a :. encode () bw b :. HNil))) examples
   where
-    chunkSize = natValI @batch `div` 4
+    chunkSize = natValI @batch `div` 8
 
 runModelTop :: forall batch. BaseWeights -> Tensor Dev DT '[batch,2*Size] -> Tensor Dev DT '[batch,1]
 runModelTop BaseWeights{layer2,layer1,layer0}
   = sigmoid
   . forward layer2
-  . relu
-  . forward layer1
   . tanh
+  . forward layer1
+  . relu
   . forward layer0
 
 data BaseWeights = BaseWeights
