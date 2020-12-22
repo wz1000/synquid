@@ -21,6 +21,7 @@ import Data.Maybe
 import System.Random.Shuffle
 import System.Time.Extra
 import qualified Data.Vector.Sized as V
+import System.FilePath
 
 upsample :: [(a,Bool)] -> [(a,Bool)]
 upsample xs = case find snd xs of
@@ -28,23 +29,27 @@ upsample xs = case find snd xs of
   where
     l = length xs - 2
 
-trainAndUpdateModel :: MonadIO s => BaseWeights -> ExampleDataset -> s BaseWeights
-trainAndUpdateModel model examples' = liftIO $ do
+splitDataset :: MonadIO m => FilePath -> ExampleDataset -> m ()
+splitDataset fp examples' = liftIO $ do
+  let groups = groupBy ((==) `on` (fst . fst)) $ examples'
+  let n = Prelude.floor $ 0.1*(fromIntegral $ length groups)
+  (concat -> testdata,concat -> examples') <- splitAt n <$> shuffleM groups
+  writeData (fp <.> "train") examples'
+  writeData (fp <.> "test") testdata
+
+trainAndUpdateModel :: MonadIO s => BaseWeights -> ExampleDataset -> ExampleDataset -> s BaseWeights
+trainAndUpdateModel model examples' testdata = liftIO $ do
   if (not $ null examples')
   then do
     let groups = groupBy ((==) `on` (fst . fst)) $ examples'
-    let n = Prelude.floor $ 0.1*(fromIntegral $ length groups)
-    (concat -> testdata,examples') <- splitAt n <$> shuffleM groups
-    writeData "traindataset" (concat examples')
-    writeData "testdataset" testdata
-    let examples = map (\xs -> (fst . fst . head $ xs, map (\((_,b),c) -> (b,c)) xs)) examples'
-    print ("DATA",length testdata, length $ concat examples')
+    let examples = map (\xs -> (fst . fst . head $ xs, map (\((_,b),c) -> (b,c)) xs)) groups
+    print ("DATA",length testdata, length examples')
     let
-        maxLearningRate = 1e-2
+        maxLearningRate = 1e-3
         finalLearningRate = 1e-4
-        numEpochs = 120
-        numWarmupEpochs = 20
-        numCooldownEpochs = 20
+        numEpochs = 50
+        numWarmupEpochs = 10
+        numCooldownEpochs = 10
 
         -- single-cycle learning rate schedule, see for instance https://arxiv.org/abs/1803.09820
         learningRateSchedule epoch

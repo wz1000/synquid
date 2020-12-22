@@ -40,7 +40,6 @@ reconstruct eParams tParams goal = do
       Right (prog,d) -> do
         let examples = collectData prog d
         liftIO $ writeData "dataset" examples
-        -- trainAndWriteModel prog d (_modelweights eParams)
         pure (Right prog)
   where
     go = do

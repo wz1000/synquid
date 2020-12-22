@@ -86,7 +86,8 @@ train model optim learningRate examples' = do
 
       (tensors', optim') = step learningRate gradients tensors optim
 
-  print ("Loss",losses,map UV.length chunks)
+  let average xs = sum (map toFloat xs) / (fromIntegral $ length xs)
+  print ("Loss",average losses, losses,map UV.length chunks)
   parameters' <- hmapM' MakeIndependent tensors'
   let model' = replaceParameters model parameters'
   pure (model', optim')
