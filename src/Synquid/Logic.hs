@@ -105,7 +105,7 @@ encodeId id = do
             let env' = env { recMap = Map.insert id (i+1,env',encodeThis) $ recMap st }
             local (const env') encodeThis
           else embedHelper w_rec
-      | otherwise -> forward (w_sym $ baseWeights st) <$> encodeInt (hash id)
+      | otherwise -> pure $ forward (w_sym $ baseWeights st) $ encodeInt (hash id)
     Just idx -> pure $ forward (w_sym_idx $ baseWeights st) $ oneHot id idx
 
 oneHot :: Id -> Int -> Encoding
@@ -446,8 +446,11 @@ encodeLCons = dyadic w_lcons
 encodePair :: EncodeM Encoding -> EncodeM Encoding -> EncodeM Encoding
 encodePair = dyadic w_pair
 
-encodeInt :: Int -> EncodeM Encoding
-encodeInt i = pure $ mulScalar (fromIntegral i :: Float) ones
+encodeInt :: Int -> Encoding
+encodeInt i = ten
+  where
+    Just ten = GHC.fromList xs
+    xs = take 25 $ map (fromIntegral . (`mod` 2)) $ iterate (`div` 2) $ (i `mod` (2^25))
 
 encodeBool :: Bool -> EncodeM Encoding
 encodeBool True  = embedHelper w_false
@@ -662,7 +665,7 @@ data Formula =
 instance Encode Formula where
   encode t = case t of
     BoolLit b -> encodeBoolLit (encodeBool b)
-    IntLit i -> encodeIntLit (encodeInt $ fromIntegral i)
+    IntLit i -> encodeIntLit (pure $ encodeInt $ fromIntegral i)
     SetLit s xs -> encodeSetLit (encode s) (encode xs)
     Var s id -> encodeVar (encode s) (encodeId id)
     Unknown subst id -> encodeUnknown (pure zeros) (encodeId id) -- TODO subst
