@@ -28,6 +28,8 @@ import Debug.Trace
 import GHC.TypeLits (type (*))
 import GHC.Generics (Generic)
 import Synquid.Learn
+import Text.Pretty.Simple (pPrint)
+
 
 -- | 'reconstruct' @eParams tParams goal@ : reconstruct missing types and terms in the body of @goal@ so that it represents a valid type judgment;
 -- return a type error if that is impossible
@@ -38,6 +40,7 @@ reconstruct eParams tParams goal = do
     case res of
       Left x -> pure (Left x)
       Right (prog,d) -> do
+        -- pPrint d
         let examples = collectData prog d
         liftIO $ writeData "dataset" examples
         pure (Right prog)

@@ -15,11 +15,13 @@ import Synquid.TypeConstraintSolver
 import Synquid.Explorer
 import Synquid.Synthesizer
 import Synquid.HtmlOutput
-import Synquid.Learn (readData, trainAndUpdateModel, eval, splitDataset)
+import Synquid.Learn (readData, trainAndUpdateModel, eval, splitDataset, avg)
+import Synquid.Train (Example(..))
 
 import qualified Torch.Typed as T
-import Torch.Typed hiding (length, replicate, mode)
+import Torch.Typed hiding (length, replicate, mode, round)
 import Control.Monad
+import Control.Monad.Reader (runReader)
 import Control.Lens ((^.))
 import System.Exit
 import System.Console.CmdArgs
@@ -87,9 +89,25 @@ main = do
                     t <- readData (file <.> "test")
                     void $ trainAndUpdateModel params dat t
                   else if test then do
-                    dat <- readData file
-                    let res = map (toFloat . reshape . runModel @1 params . V.singleton . fst) dat
-                    print ("eval",eval dat res)
+                    let model' = params
+                    testdata <- readData file
+                    let testexamples :: [((EncodeEnv,Encoding,RSchema),Bool)]
+                        testexamples = do
+                          Example spec cands bound subst _qmap <- testdata
+                          let env = EncodeEnv (reverse bound) substMap mempty model'
+                              substMap = fmap (flip runReader (emptyEncodeEnv model') . encode) subst
+                              espec = runReader (encode spec) env
+                          (cand,res) <- cands
+                          pure ((env,espec,cand),res)
+                    let res = map (toFloat . reshape . runModel @1 model' . V.singleton . fst) testexamples
+                        yact = map (toFloat . reshape . encodeBool' . snd) testexamples
+                        re = zipWith (\x y -> (round x,round y)) res yact
+                        count = length $ filter (uncurry (==)) re
+                    print (count,length yact)
+                    let ev@(_,_,xs) = eval testdata res
+                    print ("Eval",ev)
+                    print (avg xs)
+                    print re
                   else if split then do
                     dat <- readData file
                     splitDataset file dat

@@ -77,6 +77,7 @@ executable synquid
                     , deepseq
                     , extra
                     , parallel
+                    , pretty-simple
 
   ghc-options: -O1 -threaded
 

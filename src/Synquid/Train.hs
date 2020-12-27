@@ -1,8 +1,11 @@
 {-# LANGUAGE PartialTypeSignatures, ScopedTypeVariables, FlexibleContexts, GADTs, TypeApplications, DataKinds, NoStarIsType,TypeOperators, DeriveAnyClass, DeriveGeneric, MultiParamTypeClasses, TypeSynonymInstances, AllowAmbiguousTypes, FlexibleInstances, BangPatterns, ViewPatterns, StandaloneDeriving, RankNTypes #-}
 {-# OPTIONS_GHC -Wall -Wno-name-shadowing -O0 #-}
-module Synquid.Train (train) where
+module Synquid.Train (train,Example(..)) where
 
 import Synquid.Logic
+import Synquid.Util
+import Synquid.TypeConstraintSolver
+import Synquid.Type hiding (set)
 
 import qualified Torch.NN as U
 import Torch.Typed hiding (DType, Device, shape, sin, any, length, replicate, round, div)
@@ -18,6 +21,9 @@ import Control.Parallel.Strategies
 import Data.List.Split
 import Control.DeepSeq
 import Data.List
+import Control.Monad.Reader
+import qualified Data.Map as Map
+import Data.Map (Map)
 
 data SumAll = SumAll
 instance Apply' SumAll ((Tensor Dev DT shape),(Tensor Dev DT '[])) (Tensor Dev DT '[]) where
@@ -27,19 +33,24 @@ data Add = Add
 instance Apply' Add ((Tensor Dev DT shape),(Tensor Dev DT shape)) (Tensor Dev DT shape) where
   apply' _ (a,b) = a + b
 
-newtype Scale = Scale Float
-instance Apply' Scale (Tensor Dev DT shape) (Tensor Dev DT shape) where
-  apply' (Scale x) xs = mulScalar x xs
-
 instance NFData (HList '[]) where
   rnf x = x `seq` ()
 instance (NFData x, NFData (HList xs)) => NFData (HList (x:xs)) where
   rnf (x :. xs) = rnf x `seq` rnf xs
 
+data Example
+  = Example
+  { target :: RType
+  , cands :: [(RSchema, Bool)]
+  , boundvars :: [Id]
+  , typeSubst :: TypeSubstitution
+  , quals :: QMap
+  } deriving (Eq,Read,Show)
+
 -- | Train the model for one epoch
 train ::
-  forall optim a b.
-  (Encode a, Encode b, _) =>
+  forall optim.
+  (_) =>
   -- | initial model datatype holding the weights
   BaseWeights ->
   -- | initial optimizer, e.g. Adam
@@ -47,7 +58,7 @@ train ::
   -- | learning rate, 'LearningRate device dtype' is a type alias for 'Tensor device dtype '[]'
   LearningRate Dev DT ->
   -- | stream of training examples consisting of inputs and outputs
-  [(a,[(b,Bool)])] ->
+  [Example] ->
   -- | final BaseWeights and optimizer
   IO (BaseWeights, optim)
 train model optim learningRate examples' = do
@@ -57,12 +68,17 @@ train model optim learningRate examples' = do
           (xs,yact') = V.unzip exs
           y' = runModel model xs
           yact = vecStack @0 $ fmap (reshape . encodeBool') yact'
-          loss = useless + binaryCrossEntropy @'ReduceMean (ones + mulScalar (4 :: Float) yact) y' yact
+          loss = useless + binaryCrossEntropy @'ReduceMean (ones + mulScalar (7 :: Float) yact) y' yact
 
+      examples :: [((EncodeEnv,Encoding,RSchema),Bool)]
       examples = do
-        (spec,cands) <- examples'
+        Example spec cands bound subst qmap <- examples'
+        let env = EncodeEnv (reverse bound) (substMap <> qualMap) mempty model
+            substMap = fmap (flip runReader (EncodeEnv (reverse bound) mempty mempty model) . encode) subst
+            qualMap = fmap (flip runReader (EncodeEnv (reverse bound) substMap mempty model) . encode) qmap
+            espec = runReader (encode spec) env
         (cand,res) <- cands
-        pure ((encode () model spec, cand),res)
+        pure ((env,espec,cand),res)
 
       numThreads = 8
       len = length examples `div` numThreads

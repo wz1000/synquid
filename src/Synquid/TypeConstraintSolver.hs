@@ -4,7 +4,7 @@
 module Synquid.TypeConstraintSolver (
   ErrorMessage,
   TypingParams (..),
-  TypingState,
+  TypingState(..),
   typingConstraints,
   typeAssignment,
   qualifierMap,

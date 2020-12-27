@@ -24,18 +24,20 @@ data BaseType r = BoolT | IntT | DatatypeT Id [TypeSkeleton r] [r] | TypeVarT Su
   deriving (Show,Read, Eq, Ord)
 
 instance Encode r => Encode (BaseType r) where
-  encode env bw t= case t of
-    BoolT -> encodeBoolT bw
-    IntT -> encodeIntT bw
-    DatatypeT id ts rs -> encodeDatatype bw (encodeId env bw id) (encode env bw ts) (encode env bw rs)
-    TypeVarT _ id -> encodeTypeVarT bw (encodeId env bw id)
+  encode t= case t of
+    BoolT -> encodeBoolT
+    IntT -> encodeIntT
+    DatatypeT id ts rs -> encodeDatatype (encodeId id) (encode ts) (encode rs)
+    TypeVarT _ id -> encodeTypeVarT (encodeId id)
 
 instance Encode r => Encode (TypeSkeleton r) where
-  encode env bw t = case t of
-    ScalarT bt r -> encodeScalarT bw (encode env bw bt) (encode env bw r)
-    FunctionT id a b -> encodeFunctionT bw (encodeId env bw id) (encode env bw a) (encode env bw b)
-    LetT id a b -> encodeLetT bw (encodeId env bw id) (encode env bw a) (encode env bw b)
-    AnyT -> encodeAnyT bw
+  encode t = case t of
+    ScalarT bt r -> encodeScalarT (encode bt) (encode r)
+    FunctionT id a b -> encodeFunctionT (encodeId id) (encode a) (encode b)
+    LetT id a b -> do
+      ea <- bindRecursive id $ encode a
+      bindKnownVar id ea $ encode b
+    AnyT -> encodeAnyT
 
 -- | Type skeletons (parametrized by refinements)
 data TypeSkeleton r =
@@ -154,19 +156,19 @@ data SchemaSkeleton r =
   deriving (Show, Eq, Read, Ord)
 
 instance Encode r => Encode (SchemaSkeleton r) where
-  encode env bw t = case t of
-    Monotype t -> encodeMonotype bw (encode env bw t)
-    ForallT id sk -> encodeForallT bw (encodeId env bw id) (encode env bw sk)
-    ForallP ps sk -> encodeForallP bw (encode env bw ps) (encode env bw sk)
+  encode t = case t of
+    Monotype t -> encodeMonotype (encode t)
+    ForallT id sk -> encodeForallT (bindId id $ encode sk)
+    ForallP (PredSig id args res) sk -> encodeForallP (encode args) (encode res) (bindId id $ encode sk)
 
-encodeMonotype :: BaseWeights -> Encoding -> Encoding
+encodeMonotype :: EncodeM Encoding -> EncodeM Encoding
 encodeMonotype = monadic w_monotype
 
-encodeForallT :: BaseWeights -> Encoding -> Encoding -> Encoding
-encodeForallT = dyadic w_forallt
+encodeForallT :: EncodeM Encoding -> EncodeM Encoding
+encodeForallT = monadic w_forallt
 
-encodeForallP :: BaseWeights -> Encoding -> Encoding -> Encoding
-encodeForallP = dyadic w_forallp
+encodeForallP :: EncodeM Encoding -> EncodeM Encoding -> EncodeM Encoding -> EncodeM Encoding
+encodeForallP = triadic w_forallp
 
 toMonotype :: SchemaSkeleton r -> TypeSkeleton r
 toMonotype (Monotype t) = t

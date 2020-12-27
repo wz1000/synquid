@@ -70,7 +70,7 @@ makeLenses ''ExplorerParams
 
 type Requirements = Map Id [RType]
 
-newtype WrapEq a = WrapEq {unWrapEq :: a} deriving Functor
+newtype WrapEq a = WrapEq {unWrapEq :: a} deriving (Functor, Show)
 instance Eq (WrapEq a) where
   _ == _ = True
 instance Ord (WrapEq a) where
@@ -87,7 +87,7 @@ data ExplorerState = ExplorerState {
   _decisionRecord :: WrapEq Decisions  -- ^ List of decisions encounterd
 } deriving (Eq, Ord)
 
-type Decisions = Map Int (RType,[(Id,RSchema)])
+type Decisions = Map Int (RType,[(Id,RSchema)],Environment,TypingState)
 
 makeLenses ''ExplorerState
 
@@ -446,7 +446,7 @@ enumerateAt env typ 0 = do
     u <- hashUnique <$> liftIO newUnique
     tass <- use typingState
     model <- asks (view $ _1 . modelweights)
-    decisionRecord %= fmap (Map.insert u (typ, symbols'))
+    decisionRecord %= fmap (Map.insert u (typ, symbols',env,tass))
     msum $ map (pickSymbol u) $ symbols'
   where
     pickSymbol u (name, sch) = do
